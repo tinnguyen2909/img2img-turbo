@@ -29,7 +29,8 @@ def main(args):
     set_seed(args.seed)
 
     if accelerator.is_main_process:
-        os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
+        checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
+        os.makedirs(checkpoint_dir, exist_ok=True)
 
     tokenizer = AutoTokenizer.from_pretrained("stabilityai/sd-turbo", subfolder="tokenizer", revision=args.revision, use_fast=False,)
     noise_scheduler_1step = make_1step_sched()
@@ -315,7 +316,8 @@ def main(args):
                                 torch.cuda.empty_cache()
 
                     if global_step % args.checkpointing_steps == 1:
-                        outf = os.path.join(args.output_dir, "checkpoints", f"model_{global_step}.pkl")
+                        # Save new checkpoint
+                        outf = os.path.join(checkpoint_dir, f"model_{global_step}.pkl")
                         sd = {}
                         sd["l_target_modules_encoder"] = l_modules_unet_encoder
                         sd["l_target_modules_decoder"] = l_modules_unet_decoder
@@ -334,6 +336,20 @@ def main(args):
                         sd["patch_sample_f"] = eval_patch_sample_f.state_dict()
                         
                         torch.save(sd, outf)
+                        
+                        # Keep only the 3 most recent checkpoints
+                        if accelerator.is_main_process:
+                            # Get all checkpoint files
+                            checkpoint_files = glob(os.path.join(checkpoint_dir, "model_*.pkl"))
+                            # Sort by modification time, newest first
+                            checkpoint_files.sort(key=os.path.getmtime, reverse=True)
+                            # Remove all but the 3 most recent
+                            for old_checkpoint in checkpoint_files[3:]:
+                                try:
+                                    os.remove(old_checkpoint)
+                                except Exception as e:
+                                    print(f"Error removing old checkpoint {old_checkpoint}: {e}")
+                        
                         gc.collect()
                         torch.cuda.empty_cache()
 
