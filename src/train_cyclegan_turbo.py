@@ -36,6 +36,33 @@ def main(args):
     unet, l_modules_unet_encoder, l_modules_unet_decoder, l_modules_unet_others = initialize_unet(args.lora_rank_unet, return_lora_module_names=True)
     vae_a2b, vae_lora_target_modules = initialize_vae(args.lora_rank_vae, return_lora_module_names=True)
 
+    # Load checkpoint if continuing training
+    if args.continue_train and args.pretrained_model_name_or_path:
+        if accelerator.is_main_process:
+            print(f"Loading checkpoint from {args.pretrained_model_name_or_path}")
+        checkpoint = torch.load(args.pretrained_model_name_or_path, map_location="cpu")
+        
+        # Verify that LoRA ranks match
+        if checkpoint["rank_unet"] != args.lora_rank_unet:
+            raise ValueError(f"Checkpoint LoRA rank ({checkpoint['rank_unet']}) does not match current setting ({args.lora_rank_unet})")
+        if checkpoint["rank_vae"] != args.lora_rank_vae:
+            raise ValueError(f"Checkpoint VAE LoRA rank ({checkpoint['rank_vae']}) does not match current setting ({args.lora_rank_vae})")
+        
+        # Load UNet adapters
+        unet.load_adapter(checkpoint["sd_encoder"], adapter_name="default_encoder")
+        unet.load_adapter(checkpoint["sd_decoder"], adapter_name="default_decoder")
+        unet.load_adapter(checkpoint["sd_other"], adapter_name="default_others")
+        
+        # Load VAE states
+        vae_a2b.load_state_dict(checkpoint["sd_vae_enc"])
+        vae_b2a = copy.deepcopy(vae_a2b)
+        vae_b2a.load_state_dict(checkpoint["sd_vae_dec"])
+        
+        if accelerator.is_main_process:
+            print("Successfully loaded checkpoint")
+    else:
+        vae_b2a = copy.deepcopy(vae_a2b)
+    
     weight_dtype = torch.float32
     vae_a2b.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
@@ -60,13 +87,11 @@ def main(args):
         torch.backends.cuda.matmul.allow_tf32 = True
 
     unet.conv_in.requires_grad_(True)
-    vae_b2a = copy.deepcopy(vae_a2b)
-    params_gen = CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a)
 
     vae_enc = VAE_encode(vae_a2b, vae_b2a=vae_b2a)
     vae_dec = VAE_decode(vae_a2b, vae_b2a=vae_b2a)
 
-    optimizer_gen = torch.optim.AdamW(params_gen, lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
+    optimizer_gen = torch.optim.AdamW(CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a), lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay, eps=args.adam_epsilon,)
 
     params_disc = list(net_disc_a.parameters()) + list(net_disc_b.parameters())
@@ -202,7 +227,7 @@ def main(args):
                 loss_cycle_b += net_lpips(cyc_rec_b, img_b).mean() * args.lambda_cycle_lpips
                 accelerator.backward(loss_cycle_a + loss_cycle_b, retain_graph=False)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a), args.max_grad_norm)
     
                 optimizer_gen.step()
                 lr_scheduler_gen.step()
@@ -217,7 +242,7 @@ def main(args):
                 loss_gan_b = net_disc_b(fake_a, for_G=True).mean() * args.lambda_gan
                 accelerator.backward(loss_gan_a + loss_gan_b, retain_graph=False)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a), args.max_grad_norm)
                 optimizer_gen.step()
                 lr_scheduler_gen.step()
                 optimizer_gen.zero_grad()
@@ -235,7 +260,7 @@ def main(args):
                 loss_g_idt = loss_idt_a + loss_idt_b
                 accelerator.backward(loss_g_idt, retain_graph=False)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
+                    accelerator.clip_grad_norm_(CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a), args.max_grad_norm)
                 optimizer_gen.step()
                 lr_scheduler_gen.step()
                 optimizer_gen.zero_grad()

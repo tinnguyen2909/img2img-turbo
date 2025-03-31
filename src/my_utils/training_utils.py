@@ -134,6 +134,7 @@ def parse_args_unpaired_training():
     parser.add_argument("--max_train_steps", type=int, default=None)
 
     # args for the model
+    parser.add_argument("--continue_train", action="store_true", help="Continue training from a checkpoint")
     parser.add_argument("--pretrained_model_name_or_path", default="stabilityai/sd-turbo")
     parser.add_argument("--revision", default=None, type=str)
     parser.add_argument("--variant", default=None, type=str)
