@@ -258,9 +258,9 @@ def main(args):
                 loss_idt = crit_idt(idt_b, img_b) * args.lambda_idt
                 loss_idt += net_lpips(idt_b, img_b).mean() * args.lambda_idt_lpips
                 
-                # Add new identity loss between real A and fake B
-                loss_idt += crit_idt(fake_b, img_a) * args.lambda_idt_A
-                loss_idt += net_lpips(fake_b, img_a).mean() * args.lambda_idt_A_lpips
+                # Add new identity loss between real A and fake B (with detach)
+                loss_idt += crit_idt(fake_b.detach(), img_a) * args.lambda_idt_A
+                loss_idt += net_lpips(fake_b.detach(), img_a).mean() * args.lambda_idt_A_lpips
 
                 accelerator.backward(loss_idt, retain_graph=False)
                 if accelerator.sync_gradients:
