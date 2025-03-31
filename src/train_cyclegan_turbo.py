@@ -17,7 +17,7 @@ from peft.utils import get_peft_model_state_dict
 from cleanfid.fid import get_folder_features, build_feature_extractor, frechet_distance
 import vision_aided_loss
 from model import make_1step_sched
-from cyclegan_turbo import CycleGAN_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae
+from cyclegan_turbo import CycleGAN_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae, LoraConfig
 from my_utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training, UnpairedDataset_CutTurbo
 from my_utils.dino_struct import DinoStructureLoss
 import random
@@ -40,28 +40,30 @@ def main(args):
     if args.continue_train and args.pretrained_model_name_or_path:
         if accelerator.is_main_process:
             print(f"Loading checkpoint from {args.pretrained_model_name_or_path}")
-        checkpoint = torch.load(args.pretrained_model_name_or_path, map_location="cpu")
+        
+        # Create CycleGAN_Turbo instance with the pretrained model
+        model = CycleGAN_Turbo(pretrained_path=args.pretrained_model_name_or_path)
+        
+        # Extract the components we need for training
+        unet = model.unet
+        vae_a2b = model.vae
+        vae_b2a = model.vae_b2a
+        vae_enc = model.vae_enc
+        vae_dec = model.vae_dec
         
         # Verify that LoRA ranks match
+        checkpoint = torch.load(args.pretrained_model_name_or_path, map_location="cpu")
         if checkpoint["rank_unet"] != args.lora_rank_unet:
             raise ValueError(f"Checkpoint LoRA rank ({checkpoint['rank_unet']}) does not match current setting ({args.lora_rank_unet})")
         if checkpoint["rank_vae"] != args.lora_rank_vae:
             raise ValueError(f"Checkpoint VAE LoRA rank ({checkpoint['rank_vae']}) does not match current setting ({args.lora_rank_vae})")
         
-        # Load UNet adapters
-        unet.load_adapter(checkpoint["sd_encoder"], adapter_name="default_encoder")
-        unet.load_adapter(checkpoint["sd_decoder"], adapter_name="default_decoder")
-        unet.load_adapter(checkpoint["sd_other"], adapter_name="default_others")
-        
-        # Load VAE states
-        vae_a2b.load_state_dict(checkpoint["sd_vae_enc"])
-        vae_b2a = copy.deepcopy(vae_a2b)
-        vae_b2a.load_state_dict(checkpoint["sd_vae_dec"])
-        
         if accelerator.is_main_process:
             print("Successfully loaded checkpoint")
     else:
         vae_b2a = copy.deepcopy(vae_a2b)
+        vae_enc = VAE_encode(vae_a2b, vae_b2a=vae_b2a)
+        vae_dec = VAE_decode(vae_a2b, vae_b2a=vae_b2a)
     
     weight_dtype = torch.float32
     vae_a2b.to(accelerator.device, dtype=weight_dtype)
@@ -87,9 +89,6 @@ def main(args):
         torch.backends.cuda.matmul.allow_tf32 = True
 
     unet.conv_in.requires_grad_(True)
-
-    vae_enc = VAE_encode(vae_a2b, vae_b2a=vae_b2a)
-    vae_dec = VAE_decode(vae_a2b, vae_b2a=vae_b2a)
 
     optimizer_gen = torch.optim.AdamW(CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a), lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay, eps=args.adam_epsilon,)
