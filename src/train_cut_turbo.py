@@ -243,7 +243,12 @@ def main(args):
                 """
                 # We already have fake_b from the PatchNCE step
                 loss_gan = net_disc(fake_b, for_G=True).mean() * args.lambda_gan
-                accelerator.backward(loss_gan, retain_graph=True)
+
+                # Add new identity loss between real A and fake B (with detach)
+                loss_idt_A = crit_idt(fake_b, img_a) * args.lambda_idt_A
+                loss_idt_A += net_lpips(fake_b, img_a).mean() * args.lambda_idt_A_lpips
+                loss_gan_with_idt = loss_gan + loss_idt_A
+                accelerator.backward(loss_gan_with_idt, retain_graph=False)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
                 optimizer_gen.step()
@@ -258,12 +263,7 @@ def main(args):
                 loss_idt = crit_idt(idt_b, img_b) * args.lambda_idt
                 loss_idt += net_lpips(idt_b, img_b).mean() * args.lambda_idt_lpips
                 
-                # Add new identity loss between real A and fake B (with detach)
-                loss_idt_A = crit_idt(fake_b, img_a) * args.lambda_idt_A
-                loss_idt_A += net_lpips(fake_b, img_a).mean() * args.lambda_idt_A_lpips
-
                 accelerator.backward(loss_idt, retain_graph=False)
-                accelerator.backward(loss_idt_A, retain_graph=False)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
                 optimizer_gen.step()
