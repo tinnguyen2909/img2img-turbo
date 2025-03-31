@@ -18,9 +18,10 @@ from cleanfid.fid import get_folder_features, build_feature_extractor, frechet_d
 import vision_aided_loss
 from model import make_1step_sched
 from cut_turbo import CUT_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae
-from my_utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training
+from my_utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training, UnpairedDataset_CutTurbo
 from my_utils.dino_struct import DinoStructureLoss
 from patch_nce import PatchSampleF, PatchNCELoss
+import random
 
 
 def main(args):
@@ -80,18 +81,23 @@ def main(args):
     optimizer_disc = torch.optim.AdamW(params_disc, lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay, eps=args.adam_epsilon,)
 
-    dataset_train = UnpairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_img_prep, split="train", tokenizer=tokenizer)
+    # dataset_train = UnpairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_img_prep, split="train", tokenizer=tokenizer)
+    dataset_train = UnpairedDataset_CutTurbo(A=args.path_A, B=args.path_B, image_prep=args.train_img_prep, tokenizer=tokenizer, max_pairs=None)
     train_dataloader = torch.utils.data.DataLoader(dataset_train, batch_size=args.train_batch_size, shuffle=True, num_workers=args.dataloader_num_workers)
     T_val = build_transform(args.val_img_prep)
     fixed_caption_src = dataset_train.fixed_caption_src
     fixed_caption_tgt = dataset_train.fixed_caption_tgt
     l_images_src_test = []
-    for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
-        l_images_src_test.extend(glob(os.path.join(args.dataset_folder, "test_A", ext)))
+    for ext in ["*.jpg", "*.jpeg", "*.png", "*.webp"]:
+        for root, _, _ in os.walk(args.path_A):
+            l_images_src_test.extend(glob(os.path.join(root, ext)))
     l_images_tgt_test = []
-    for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp"]:
-        l_images_tgt_test.extend(glob(os.path.join(args.dataset_folder, "test_B", ext)))
+    for ext in ["*.jpg", "*.jpeg", "*.png", "*.webp"]:
+        for root, _, _ in os.walk(args.path_B):
+            l_images_tgt_test.extend(glob(os.path.join(root, ext)))
     l_images_src_test, l_images_tgt_test = sorted(l_images_src_test), sorted(l_images_tgt_test)
+    l_images_src_test = random.sample(l_images_src_test, 200)
+    l_images_tgt_test = random.sample(l_images_tgt_test, 200)
 
     # make the reference FID statistics
     if accelerator.is_main_process:
@@ -349,4 +355,6 @@ if __name__ == "__main__":
     args.lambda_NCE = getattr(args, 'lambda_NCE', 1.0)  # Weight for PatchNCE loss
     args.nce_temp = getattr(args, 'nce_temp', 0.07)  # Temperature for NCE loss
     args.num_patches = getattr(args, 'num_patches', 256)  # Number of patches for NCE
+    args.path_A = getattr(args, 'path_A', "data/A")
+    args.path_B = getattr(args, 'path_B', "data/B")
     main(args)

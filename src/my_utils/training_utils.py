@@ -178,7 +178,9 @@ def parse_args_unpaired_training():
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
 
     # parser.add_argument("--lambda_nce", default=10.0, type=float, help="Weight for NCE loss")
-
+    parser.add_argument("--path_A", type=str, required=False)
+    parser.add_argument("--path_B", type=str, required=False)
+    parser.add_argument("--max_pairs", type=int, default=None)
     args = parser.parse_args()
     return args
 
@@ -362,6 +364,107 @@ class UnpairedDataset(torch.utils.data.Dataset):
         int: The total number of items in the dataset.
         """
         return len(self.l_imgs_src) + len(self.l_imgs_tgt)
+
+    def __getitem__(self, index):
+        """
+        Fetches a pair of unaligned images from the source and target domains along with their 
+        corresponding tokenized captions.
+
+        For the source domain, if the requested index is within the range of available images,
+        the specific image at that index is chosen. If the index exceeds the number of source
+        images, a random source image is selected. For the target domain,
+        an image is always randomly selected, irrespective of the index, to maintain the 
+        unpaired nature of the dataset.
+
+        Both images are preprocessed according to the specified image transformation `T`, and normalized.
+        The fixed captions for both domains
+        are included along with their tokenized forms.
+
+        Parameters:
+        - index (int): The index of the source image to retrieve.
+
+        Returns:
+        dict: A dictionary containing processed data for a single training example, with the following keys:
+            - "pixel_values_src": The processed source image
+            - "pixel_values_tgt": The processed target image
+            - "caption_src": The fixed caption of the source domain.
+            - "caption_tgt": The fixed caption of the target domain.
+            - "input_ids_src": The source domain's fixed caption tokenized.
+            - "input_ids_tgt": The target domain's fixed caption tokenized.
+        """
+        if index < len(self.l_imgs_src):
+            img_path_src = self.l_imgs_src[index]
+        else:
+            img_path_src = random.choice(self.l_imgs_src)
+        img_path_tgt = random.choice(self.l_imgs_tgt)
+        img_pil_src = Image.open(img_path_src).convert("RGB")
+        img_pil_tgt = Image.open(img_path_tgt).convert("RGB")
+        img_t_src = F.to_tensor(self.T(img_pil_src))
+        img_t_tgt = F.to_tensor(self.T(img_pil_tgt))
+        img_t_src = F.normalize(img_t_src, mean=[0.5], std=[0.5])
+        img_t_tgt = F.normalize(img_t_tgt, mean=[0.5], std=[0.5])
+        return {
+            "pixel_values_src": img_t_src,
+            "pixel_values_tgt": img_t_tgt,
+            "caption_src": self.fixed_caption_src,
+            "caption_tgt": self.fixed_caption_tgt,
+            "input_ids_src": self.input_ids_src,
+            "input_ids_tgt": self.input_ids_tgt,
+        }
+
+class UnpairedDataset_CutTurbo(torch.utils.data.Dataset):
+    def __init__(self, A, B, image_prep, tokenizer, max_pairs=None):
+        super().__init__()
+        self.A = A
+        self.B = B
+        self.tokenizer = tokenizer
+        self.max_pairs = max_pairs
+        
+        with open(os.path.join("data", "fixed_prompt_a.txt"), "r") as f:
+            self.fixed_caption_src = f.read().strip()
+            self.input_ids_src = self.tokenizer(
+                self.fixed_caption_src, max_length=self.tokenizer.model_max_length,
+                padding="max_length", truncation=True, return_tensors="pt"
+            ).input_ids
+
+        with open(os.path.join("data", "fixed_prompt_b.txt"), "r") as f:
+            self.fixed_caption_tgt = f.read().strip()
+            self.input_ids_tgt = self.tokenizer(
+                self.fixed_caption_tgt, max_length=self.tokenizer.model_max_length,
+                padding="max_length", truncation=True, return_tensors="pt"
+            ).input_ids
+            
+        # Find all images in the source (A) directory and subdirectories
+        self.l_imgs_src = []
+        for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.gif", "*.webp"]:
+            for root, _, _ in os.walk(self.A):
+                self.l_imgs_src.extend(glob(os.path.join(root, ext)))
+        self.l_imgs_src = sorted(self.l_imgs_src)
+                
+        # Find all images in the target (B) directory and subdirectories
+        self.l_imgs_tgt = []
+        for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.gif", "*.webp"]:
+            for root, _, _ in os.walk(self.B):
+                self.l_imgs_tgt.extend(glob(os.path.join(root, ext)))
+        self.l_imgs_tgt = sorted(self.l_imgs_tgt)
+                
+        # Apply max_pairs limit if specified
+        if self.max_pairs is not None:
+            # Limit the number of source and target images
+            self.l_imgs_src = self.l_imgs_src[:self.max_pairs]
+            self.l_imgs_tgt = self.l_imgs_tgt[:self.max_pairs]
+            
+        self.T = build_transform(image_prep)
+
+    def __len__(self):
+        """
+        Returns:
+        int: The total number of items in the dataset, respecting the max_pairs limit if set.
+        """
+        total_len = len(self.l_imgs_src) + len(self.l_imgs_tgt)
+        if self.max_pairs is not None:
+            return min(total_len, 2 * self.max_pairs)  # 2x because we're combining two domains
+        return total_len
 
     def __getitem__(self, index):
         """
