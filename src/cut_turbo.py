@@ -140,7 +140,7 @@ class CUT_Turbo(torch.nn.Module):
         
         # Initialize PatchSampleF and PatchNCELoss for contrastive learning
         self.nce_layers = nce_layers if nce_layers is not None else [0, 4, 8, 12, 16]
-        self.patch_sample_f = PatchSampleF(use_mlp=True, nc=256)
+        self.patch_sample_f = PatchSampleF(use_mlp=True, nc=256, gpu_ids=[0])
         self.criterionNCE = PatchNCELoss(nce_temp=nce_temp)
         self.num_patches = num_patches
         
@@ -182,6 +182,16 @@ class CUT_Turbo(torch.nn.Module):
         self.patch_sample_f.cuda()
 
     def load_ckpt_from_state_dict(self, sd):
+        # Check if adapters already exist and remove them if they do
+        if hasattr(self.unet, "peft_config"):
+            if "default_encoder" in self.unet.peft_config:
+                self.unet.delete_adapter("default_encoder")
+            if "default_decoder" in self.unet.peft_config:
+                self.unet.delete_adapter("default_decoder")
+            if "default_others" in self.unet.peft_config:
+                self.unet.delete_adapter("default_others")
+                
+        # Now add the adapters
         lora_conf_encoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_encoder"], lora_alpha=sd["rank_unet"])
         lora_conf_decoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_decoder"], lora_alpha=sd["rank_unet"])
         lora_conf_others = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_modules_others"], lora_alpha=sd["rank_unet"])
@@ -202,6 +212,10 @@ class CUT_Turbo(torch.nn.Module):
                 p.data.copy_(sd["sd_other"][name_sd])
         self.unet.set_adapter(["default_encoder", "default_decoder", "default_others"])
 
+        # Check if VAE has adapter and remove it
+        if hasattr(self.vae, "peft_config") and "vae_skip" in self.vae.peft_config:
+            self.vae.delete_adapter("vae_skip")
+            
         vae_lora_config = LoraConfig(r=sd["rank_vae"], init_lora_weights="gaussian", target_modules=sd["vae_lora_target_modules"])
         self.vae.add_adapter(vae_lora_config, adapter_name="vae_skip")
         self.vae.decoder.gamma = 1
@@ -210,6 +224,17 @@ class CUT_Turbo(torch.nn.Module):
         self.vae_enc.load_state_dict(sd["sd_vae_enc"])
         self.vae_dec = VAE_decode(self.vae, vae_b2a=self.vae_b2a)
         self.vae_dec.load_state_dict(sd["sd_vae_dec"])
+        
+        # Load patch_sample_f state if present in the checkpoint
+        if "patch_sample_f" in sd:
+            # If there are MLPs in the state dict, make sure we initialize the MLPs first
+            if any("mlp" in k for k in sd["patch_sample_f"].keys()):
+                # Create dummy features to initialize MLPs
+                dummy_features = [torch.randn(1, 256, 8, 8).cuda() for _ in range(3)]
+                # This will trigger MLP creation
+                self.patch_sample_f(dummy_features, num_patches=1) 
+            # Now load the state dict
+            self.patch_sample_f.load_state_dict(sd["patch_sample_f"])
 
     def load_ckpt_from_url(self, url, ckpt_folder):
         os.makedirs(ckpt_folder, exist_ok=True)
@@ -261,38 +286,87 @@ class CUT_Turbo(torch.nn.Module):
 
     @staticmethod
     def get_traininable_params(unet, vae_a2b, vae_b2a, patch_sample_f=None):
-        # add all unet parameters
-        params_gen = list(unet.conv_in.parameters())
+        # Use a set to track already added parameter tensors to avoid duplicates
+        param_set = set()
+        params_gen = []
+        
+        # Add all unet parameters
         unet.conv_in.requires_grad_(True)
         unet.set_adapters(["default_encoder", "default_decoder", "default_others"])
-        for n,p in unet.named_parameters():
+        
+        # Add conv_in parameters 
+        for p in unet.conv_in.parameters():
+            if p.requires_grad and p not in param_set:
+                params_gen.append(p)
+                param_set.add(p)
+        
+        # Add LoRA parameters
+        for n, p in unet.named_parameters():
             if "lora" in n and "default" in n:
                 assert p.requires_grad
-                params_gen.append(p)
+                if p not in param_set:
+                    params_gen.append(p)
+                    param_set.add(p)
         
-        # add all vae_a2b parameters
-        for n,p in vae_a2b.named_parameters():
-            if "lora" in n and "vae_skip" in n:
-                assert p.requires_grad
+        # Add all vae_a2b parameters
+        for n, p in vae_a2b.named_parameters():
+            if "lora" in n and "vae_skip" in n and p.requires_grad and p not in param_set:
                 params_gen.append(p)
-        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_1.parameters())
-        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_2.parameters())
-        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_3.parameters())
-        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_4.parameters())
+                param_set.add(p)
+        
+        # Add skip connection parameters for vae_a2b
+        for param in vae_a2b.decoder.skip_conv_1.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
+                
+        for param in vae_a2b.decoder.skip_conv_2.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
+                
+        for param in vae_a2b.decoder.skip_conv_3.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
+                
+        for param in vae_a2b.decoder.skip_conv_4.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
 
-        # add all vae_b2a parameters
-        for n,p in vae_b2a.named_parameters():
-            if "lora" in n and "vae_skip" in n:
-                assert p.requires_grad
+        # Add all vae_b2a parameters (only for initialization; not used in CUT)
+        for n, p in vae_b2a.named_parameters():
+            if "lora" in n and "vae_skip" in n and p.requires_grad and p not in param_set:
                 params_gen.append(p)
-        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_1.parameters())
-        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_2.parameters())
-        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_3.parameters())
-        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_4.parameters())
+                param_set.add(p)
+                
+        for param in vae_b2a.decoder.skip_conv_1.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
+                
+        for param in vae_b2a.decoder.skip_conv_2.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
+                
+        for param in vae_b2a.decoder.skip_conv_3.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
+                
+        for param in vae_b2a.decoder.skip_conv_4.parameters():
+            if param not in param_set:
+                params_gen.append(param)
+                param_set.add(param)
         
-        # add patch_sample_f parameters for contrastive learning
+        # Add patch_sample_f parameters for contrastive learning
         if patch_sample_f is not None:
-            params_gen = params_gen + list(patch_sample_f.parameters())
+            for param in patch_sample_f.parameters():
+                if param not in param_set:
+                    params_gen.append(param)
+                    param_set.add(param)
             
         return params_gen
 

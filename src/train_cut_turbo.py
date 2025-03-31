@@ -322,6 +322,11 @@ def main(args):
                         sd["vae_lora_target_modules"] = vae_lora_target_modules
                         sd["sd_vae_enc"] = eval_vae_enc.state_dict()
                         sd["sd_vae_dec"] = eval_vae_dec.state_dict()
+                        
+                        # Save PatchSampleF state
+                        eval_patch_sample_f = accelerator.unwrap_model(patch_sample_f)
+                        sd["patch_sample_f"] = eval_patch_sample_f.state_dict()
+                        
                         torch.save(sd, outf)
                         gc.collect()
                         torch.cuda.empty_cache()
