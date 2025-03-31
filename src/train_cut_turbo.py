@@ -257,6 +257,11 @@ def main(args):
                 idt_b = CUT_Turbo.forward_with_networks(img_b, "a2b", vae_enc, unet, vae_dec, noise_scheduler_1step, timesteps, fixed_a2b_emb)
                 loss_idt = crit_idt(idt_b, img_b) * args.lambda_idt
                 loss_idt += net_lpips(idt_b, img_b).mean() * args.lambda_idt_lpips
+                
+                # Add new identity loss between real A and fake B
+                loss_idt += crit_idt(fake_b, img_a) * args.lambda_idt_A
+                loss_idt += net_lpips(fake_b, img_a).mean() * args.lambda_idt_A_lpips
+
                 accelerator.backward(loss_idt, retain_graph=False)
                 if accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
@@ -373,4 +378,7 @@ if __name__ == "__main__":
     args.num_patches = getattr(args, 'num_patches', 256)  # Number of patches for NCE
     args.path_A = getattr(args, 'path_A', "data/A")
     args.path_B = getattr(args, 'path_B', "data/B")
+    # Add new identity loss parameters
+    args.lambda_idt_A = getattr(args, 'lambda_idt_A', 1.0)
+    args.lambda_idt_A_lpips = getattr(args, 'lambda_idt_A_lpips', 1.0)
     main(args)
