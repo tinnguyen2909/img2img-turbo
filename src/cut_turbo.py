@@ -3,7 +3,6 @@ import sys
 import copy
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoTokenizer, CLIPTextModel
 from diffusers import AutoencoderKL, UNet2DConditionModel
 from peft import LoraConfig
@@ -11,31 +10,56 @@ from peft.utils import get_peft_model_state_dict
 p = "src/"
 sys.path.append(p)
 from model import make_1step_sched, my_vae_encoder_fwd, my_vae_decoder_fwd, download_url
+from patch_nce import PatchNCELoss, PatchSampleF
+
+
+class UNetFeatureHook:
+    def __init__(self):
+        self.features = []
+    
+    def __call__(self, module, input, output):
+        # For ResNet blocks: output is tuple (hidden_states,)
+        # For CrossAttn blocks: output is tuple (hidden_states, res_samples)
+        if isinstance(output, tuple):
+            self.features.append(output[0].detach())
+        else:
+            self.features.append(output.detach())
 
 
 class VAE_encode(nn.Module):
-    def __init__(self, vae):
+    def __init__(self, vae, vae_b2a=None):
         super(VAE_encode, self).__init__()
         self.vae = vae
+        self.vae_b2a = vae_b2a
 
-    def forward(self, x):
-        return self.vae.encode(x).latent_dist.sample() * self.vae.config.scaling_factor
+    def forward(self, x, direction):
+        assert direction in ["a2b", "b2a"]
+        if direction == "a2b":
+            _vae = self.vae
+        else:
+            _vae = self.vae_b2a
+        return _vae.encode(x).latent_dist.sample() * _vae.config.scaling_factor
 
 
 class VAE_decode(nn.Module):
-    def __init__(self, vae):
+    def __init__(self, vae, vae_b2a=None):
         super(VAE_decode, self).__init__()
         self.vae = vae
+        self.vae_b2a = vae_b2a
 
-    def forward(self, x):
-        assert self.vae.encoder.current_down_blocks is not None
-        self.vae.decoder.incoming_skip_acts = self.vae.encoder.current_down_blocks
-        x_decoded = (self.vae.decode(x / self.vae.config.scaling_factor).sample).clamp(-1, 1)
+    def forward(self, x, direction):
+        assert direction in ["a2b", "b2a"]
+        if direction == "a2b":
+            _vae = self.vae
+        else:
+            _vae = self.vae_b2a
+        assert _vae.encoder.current_down_blocks is not None
+        _vae.decoder.incoming_skip_acts = _vae.encoder.current_down_blocks
+        x_decoded = (_vae.decode(x / _vae.config.scaling_factor).sample).clamp(-1, 1)
         return x_decoded
 
 
 def initialize_unet(rank, return_lora_module_names=False):
-    """Initialize UNet with LoRA adapters for the CUT model"""
     unet = UNet2DConditionModel.from_pretrained("stabilityai/sd-turbo", subfolder="unet")
     unet.requires_grad_(False)
     unet.train()
@@ -67,7 +91,6 @@ def initialize_unet(rank, return_lora_module_names=False):
 
 
 def initialize_vae(rank=4, return_lora_module_names=False):
-    """Initialize VAE with LoRA for the CUT model"""
     vae = AutoencoderKL.from_pretrained("stabilityai/sd-turbo", subfolder="vae")
     vae.requires_grad_(False)
     vae.encoder.forward = my_vae_encoder_fwd.__get__(vae.encoder, vae.encoder.__class__)
@@ -97,94 +120,8 @@ def initialize_vae(rank=4, return_lora_module_names=False):
         return vae
 
 
-class PatchNCELoss(nn.Module):
-    """PatchNCE loss for contrastive learning between corresponding patches"""
-    def __init__(self, nce_layers, nce_temp=0.07, nce_includes_all_negatives_from_minibatch=False):
-        super().__init__()
-        self.nce_layers = nce_layers
-        self.nce_temp = nce_temp
-        self.nce_includes_all_negatives_from_minibatch = nce_includes_all_negatives_from_minibatch
-        self.cross_entropy_loss = torch.nn.CrossEntropyLoss(reduction='none')
-        self.mask_dtype = torch.bool
-
-    def forward(self, feat_q, feat_k):
-        batch_size = feat_q[0].shape[0]
-        dim = feat_q[0].shape[1]
-        total_loss = 0.0
-        
-        for f_q, f_k in zip(feat_q, feat_k):
-            n_patches = f_q.shape[2] * f_q.shape[3]
-            f_q = f_q.permute(0, 2, 3, 1).reshape(batch_size, n_patches, dim)
-            f_k = f_k.permute(0, 2, 3, 1).reshape(batch_size, n_patches, dim)
-            
-            # Calculate L_NCE for each layer
-            l_pos = torch.bmm(f_q, f_k.transpose(1, 2)) / self.nce_temp
-            
-            # For each query patch, use all other patches as negatives
-            if self.nce_includes_all_negatives_from_minibatch:
-                # Reshape to include all patches from all batch elements
-                f_q_all = f_q.reshape(-1, dim)
-                f_k_all = f_k.reshape(-1, dim)
-                l_neg_curbatch = torch.mm(f_q_all, f_k_all.t()) / self.nce_temp
-                
-                # Create a positive mask for the diagonal (corresponding patches)
-                diagonal = torch.eye(batch_size * n_patches, device=f_q.device, dtype=self.mask_dtype)
-                l_neg_curbatch.masked_fill_(diagonal, -10.0)
-                l_neg = l_neg_curbatch.reshape(batch_size, n_patches, -1)
-            else:
-                # For each query patch, use all non-corresponding patches from the same image as negatives
-                identity_matrix = torch.eye(n_patches, device=f_q.device, dtype=self.mask_dtype)[None, :, :]
-                l_neg = torch.bmm(f_q, f_q.transpose(1, 2)) / self.nce_temp
-                l_neg.masked_fill_(identity_matrix, -10.0)  # Mask out positive examples
-            
-            # Concatenate positive and negative logits and create labels
-            out = torch.cat((l_pos, l_neg), dim=2)
-            logits = out.reshape(-1, out.size(2))
-            labels = torch.zeros(logits.size(0), dtype=torch.long, device=f_q.device)
-            
-            loss = self.cross_entropy_loss(logits, labels)
-            loss = loss.reshape(batch_size, n_patches).mean()
-            total_loss += loss
-            
-        return total_loss / len(self.nce_layers)
-
-
-class PatchSampleF(nn.Module):
-    """PatchSample module that samples features from different layers"""
-    def __init__(self, nce_layers, use_mlp=True, nc=256):
-        super().__init__()
-        self.nce_layers = nce_layers
-        self.use_mlp = use_mlp
-        if use_mlp:
-            self.mlps = nn.ModuleList()
-            for layer_id in range(len(nce_layers)):
-                input_nc = 512  # Adjust based on UNet block output dimensions
-                mlp = nn.Sequential(
-                    nn.Conv2d(input_nc, nc, kernel_size=1, padding=0, bias=True),
-                    nn.ReLU(),
-                    nn.Conv2d(nc, nc, kernel_size=1, padding=0, bias=True),
-                )
-                self.mlps.append(mlp)
-
-    def forward(self, unet, z, text_emb, timesteps, layers=None):
-        if layers is None:
-            layers = self.nce_layers
-            
-        features = []
-        result = unet(z, timesteps, encoder_hidden_states=text_emb, output_hidden_states=True)
-        hidden_states = result.hidden_states
-        
-        for layer_id in layers:
-            feat = hidden_states[layer_id]
-            if self.use_mlp:
-                feat = self.mlps[layer_id](feat)
-            features.append(feat)
-            
-        return features
-
-
 class CUT_Turbo(torch.nn.Module):
-    def __init__(self, pretrained_name=None, pretrained_path=None, ckpt_folder="checkpoints", lora_rank_unet=8, lora_rank_vae=4):
+    def __init__(self, pretrained_name=None, pretrained_path=None, ckpt_folder="checkpoints", lora_rank_unet=8, lora_rank_vae=4, nce_layers=None, nce_temp=0.07, num_patches=256):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained("stabilityai/sd-turbo", subfolder="tokenizer")
         self.text_encoder = CLIPTextModel.from_pretrained("stabilityai/sd-turbo", subfolder="text_encoder").cuda()
@@ -193,37 +130,56 @@ class CUT_Turbo(torch.nn.Module):
         unet = UNet2DConditionModel.from_pretrained("stabilityai/sd-turbo", subfolder="unet")
         vae.encoder.forward = my_vae_encoder_fwd.__get__(vae.encoder, vae.encoder.__class__)
         vae.decoder.forward = my_vae_decoder_fwd.__get__(vae.decoder, vae.decoder.__class__)
-        
         # add the skip connection convs
         vae.decoder.skip_conv_1 = torch.nn.Conv2d(512, 512, kernel_size=(1, 1), stride=(1, 1), bias=False).cuda()
         vae.decoder.skip_conv_2 = torch.nn.Conv2d(256, 512, kernel_size=(1, 1), stride=(1, 1), bias=False).cuda()
         vae.decoder.skip_conv_3 = torch.nn.Conv2d(128, 512, kernel_size=(1, 1), stride=(1, 1), bias=False).cuda()
         vae.decoder.skip_conv_4 = torch.nn.Conv2d(128, 256, kernel_size=(1, 1), stride=(1, 1), bias=False).cuda()
         vae.decoder.ignore_skip = False
-        
         self.unet, self.vae = unet, vae
         
-        # Define NCE layers - these represent which UNet layers to use for PatchNCE loss
-        self.nce_layers = [4, 8, 12]  # Example layers from UNet hidden states
+        # Initialize PatchSampleF and PatchNCELoss for contrastive learning
+        self.nce_layers = nce_layers if nce_layers is not None else [0, 4, 8, 12, 16]
+        self.patch_sample_f = PatchSampleF(use_mlp=True, nc=256)
+        self.criterionNCE = PatchNCELoss(nce_temp=nce_temp)
+        self.num_patches = num_patches
         
-        # Initialize PatchSampleF module for feature sampling
-        self.patch_sample = PatchSampleF(self.nce_layers, use_mlp=True)
+        if pretrained_name == "day_to_night":
+            url = "https://www.cs.cmu.edu/~img2img-turbo/models/day2night.pkl"
+            self.load_ckpt_from_url(url, ckpt_folder)
+            self.timesteps = torch.tensor([999], device="cuda").long()
+            self.caption = "driving in the night"
+            self.direction = "a2b"
+        elif pretrained_name == "night_to_day":
+            url = "https://www.cs.cmu.edu/~img2img-turbo/models/night2day.pkl"
+            self.load_ckpt_from_url(url, ckpt_folder)
+            self.timesteps = torch.tensor([999], device="cuda").long()
+            self.caption = "driving in the day"
+            self.direction = "b2a"
+        elif pretrained_name == "clear_to_rainy":
+            url = "https://www.cs.cmu.edu/~img2img-turbo/models/clear2rainy.pkl"
+            self.load_ckpt_from_url(url, ckpt_folder)
+            self.timesteps = torch.tensor([999], device="cuda").long()
+            self.caption = "driving in heavy rain"
+            self.direction = "a2b"
+        elif pretrained_name == "rainy_to_clear":
+            url = "https://www.cs.cmu.edu/~img2img-turbo/models/rainy2clear.pkl"
+            self.load_ckpt_from_url(url, ckpt_folder)
+            self.timesteps = torch.tensor([999], device="cuda").long()
+            self.caption = "driving in the day"
+            self.direction = "b2a"
         
-        # Initialize PatchNCE loss
-        self.criterionNCE = PatchNCELoss(self.nce_layers)
-        
-        if pretrained_path is not None:
+        elif pretrained_path is not None:
             sd = torch.load(pretrained_path)
             self.load_ckpt_from_state_dict(sd)
             self.timesteps = torch.tensor([999], device="cuda").long()
             self.caption = None
             self.direction = None
 
-        self.vae_enc = VAE_encode(self.vae)
-        self.vae_dec = VAE_decode(self.vae)
         self.vae_enc.cuda()
         self.vae_dec.cuda()
         self.unet.cuda()
+        self.patch_sample_f.cuda()
 
     def load_ckpt_from_state_dict(self, sd):
         lora_conf_encoder = LoraConfig(r=sd["rank_unet"], init_lora_weights="gaussian", target_modules=sd["l_target_modules_encoder"], lora_alpha=sd["rank_unet"])
@@ -249,10 +205,11 @@ class CUT_Turbo(torch.nn.Module):
         vae_lora_config = LoraConfig(r=sd["rank_vae"], init_lora_weights="gaussian", target_modules=sd["vae_lora_target_modules"])
         self.vae.add_adapter(vae_lora_config, adapter_name="vae_skip")
         self.vae.decoder.gamma = 1
-        
-        # Load patch sample network parameters if they exist
-        if "sd_patch_sample" in sd:
-            self.patch_sample.load_state_dict(sd["sd_patch_sample"])
+        self.vae_b2a = copy.deepcopy(self.vae)
+        self.vae_enc = VAE_encode(self.vae, vae_b2a=self.vae_b2a)
+        self.vae_enc.load_state_dict(sd["sd_vae_enc"])
+        self.vae_dec = VAE_decode(self.vae, vae_b2a=self.vae_b2a)
+        self.vae_dec.load_state_dict(sd["sd_vae_dec"])
 
     def load_ckpt_from_url(self, url, ckpt_folder):
         os.makedirs(ckpt_folder, exist_ok=True)
@@ -262,74 +219,94 @@ class CUT_Turbo(torch.nn.Module):
         self.load_ckpt_from_state_dict(sd)
 
     @staticmethod
-    def forward_generator(img_src, vae_enc, unet, vae_dec, sched, timesteps, text_emb):
-        """Forward pass for the generator part (source → target)"""
-        B = img_src.shape[0]
-        x_enc = vae_enc(img_src).to(img_src.dtype)
+    def forward_with_networks(x, direction, vae_enc, unet, vae_dec, sched, timesteps, text_emb, return_features=False):
+        B = x.shape[0]
+        assert direction in ["a2b", "b2a"]
+        
+        # Initialize hook containers if needed
+        hook_handles = []
+        feature_hook = None
+        
+        if return_features:
+            feature_hook = UNetFeatureHook()
+            
+            # Register hooks to specific layers
+            for block_idx, block in enumerate(unet.down_blocks):
+                if hasattr(block, 'resnets'):
+                    # Hook last ResNet layer in each down block
+                    layer = block.resnets[-1]
+                    handle = layer.register_forward_hook(feature_hook)
+                    hook_handles.append(handle)
+            
+            # Hook mid block
+            if hasattr(unet, 'mid_block'):
+                handle = unet.mid_block.register_forward_hook(feature_hook)
+                hook_handles.append(handle)
+        
+        x_enc = vae_enc(x, direction=direction).to(x.dtype)
         model_pred = unet(x_enc, timesteps, encoder_hidden_states=text_emb,).sample
+        
+        # Remove hooks immediately after use
+        if return_features:
+            for handle in hook_handles:
+                handle.remove()
+        
         x_out = torch.stack([sched.step(model_pred[i], timesteps[i], x_enc[i], return_dict=True).prev_sample for i in range(B)])
-        x_out_decoded = vae_dec(x_out)
-        return x_out_decoded, x_enc
+        x_out_decoded = vae_dec(x_out, direction=direction)
+        
+        if return_features:
+            return x_out_decoded, feature_hook.features
+        else:
+            return x_out_decoded
 
     @staticmethod
-    def compute_nce_loss(real_src, fake_tgt, enc_src, unet, patch_sample, criterionNCE, timesteps, text_emb):
-        """Compute PatchNCE loss between real source images and generated target images"""
-        # Get features from real source images
-        src_features = patch_sample(unet, enc_src, text_emb, timesteps)
-        
-        # Re-encode fake target images for feature comparison
-        with torch.no_grad():
-            enc_fake = unet(enc_src, timesteps, encoder_hidden_states=text_emb, output_hidden_states=True).hidden_states
-            fake_features = [feat.detach() for feat in enc_fake]
-        
-        # Calculate PatchNCE loss
-        loss_NCE = criterionNCE(src_features, fake_features)
-        
-        return loss_NCE
-
-    @staticmethod
-    def get_trainable_params(unet, vae, patch_sample):
-        """Get all trainable parameters for the CUT model"""
-        # UNet parameters
-        params = list(unet.conv_in.parameters())
+    def get_traininable_params(unet, vae_a2b, vae_b2a, patch_sample_f=None):
+        # add all unet parameters
+        params_gen = list(unet.conv_in.parameters())
         unet.conv_in.requires_grad_(True)
         unet.set_adapters(["default_encoder", "default_decoder", "default_others"])
-        for n, p in unet.named_parameters():
+        for n,p in unet.named_parameters():
             if "lora" in n and "default" in n:
                 assert p.requires_grad
-                params.append(p)
+                params_gen.append(p)
         
-        # VAE parameters
-        for n, p in vae.named_parameters():
+        # add all vae_a2b parameters
+        for n,p in vae_a2b.named_parameters():
             if "lora" in n and "vae_skip" in n:
                 assert p.requires_grad
-                params.append(p)
-        params = params + list(vae.decoder.skip_conv_1.parameters())
-        params = params + list(vae.decoder.skip_conv_2.parameters())
-        params = params + list(vae.decoder.skip_conv_3.parameters())
-        params = params + list(vae.decoder.skip_conv_4.parameters())
-        
-        # PatchSampleF parameters
-        params = params + list(patch_sample.parameters())
-        
-        return params
+                params_gen.append(p)
+        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_1.parameters())
+        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_2.parameters())
+        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_3.parameters())
+        params_gen = params_gen + list(vae_a2b.decoder.skip_conv_4.parameters())
 
-    def forward(self, x_t, caption=None, caption_emb=None):
-        if caption is None and caption_emb is None:
-            raise ValueError("Either caption or caption_emb must be provided")
+        # add all vae_b2a parameters
+        for n,p in vae_b2a.named_parameters():
+            if "lora" in n and "vae_skip" in n:
+                assert p.requires_grad
+                params_gen.append(p)
+        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_1.parameters())
+        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_2.parameters())
+        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_3.parameters())
+        params_gen = params_gen + list(vae_b2a.decoder.skip_conv_4.parameters())
         
+        # add patch_sample_f parameters for contrastive learning
+        if patch_sample_f is not None:
+            params_gen = params_gen + list(patch_sample_f.parameters())
+            
+        return params_gen
+
+    def forward(self, x_t, direction=None, caption=None, caption_emb=None, return_features=False):
+        if direction is None:
+            assert self.direction is not None
+            direction = self.direction
+        if caption is None and caption_emb is None:
+            assert self.caption is not None
+            caption = self.caption
         if caption_emb is not None:
             caption_enc = caption_emb
         else:
-            caption_tokens = self.tokenizer(
-                caption, max_length=self.tokenizer.model_max_length,
-                padding="max_length", truncation=True, return_tensors="pt"
-            ).input_ids.cuda()
-            caption_enc = self.text_encoder(caption_tokens)[0]
-        
-        x_enc = self.vae_enc(x_t)
-        model_pred = self.unet(x_enc, self.timesteps, encoder_hidden_states=caption_enc,).sample
-        x_out = self.sched.step(model_pred, self.timesteps, x_enc, return_dict=True).prev_sample
-        x_out_decoded = self.vae_dec(x_out)
-        
-        return x_out_decoded 
+            caption_tokens = self.tokenizer(caption, max_length=self.tokenizer.model_max_length,
+                    padding="max_length", truncation=True, return_tensors="pt").input_ids.to(x_t.device)
+            caption_enc = self.text_encoder(caption_tokens)[0].detach().clone()
+        return self.forward_with_networks(x_t, direction, self.vae_enc, self.unet, self.vae_dec, self.sched, self.timesteps, caption_enc, return_features)

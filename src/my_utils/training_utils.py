@@ -129,7 +129,7 @@ def parse_args_unpaired_training():
     parser.add_argument("--train_img_prep", required=True)
     parser.add_argument("--val_img_prep", required=True)
     parser.add_argument("--dataloader_num_workers", type=int, default=0)
-    parser.add_argument("--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader.")
+    parser.add_argument("--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader.")
     parser.add_argument("--max_train_epochs", type=int, default=100)
     parser.add_argument("--max_train_steps", type=int, default=None)
 
@@ -176,6 +176,8 @@ def parse_args_unpaired_training():
     parser.add_argument("--gradient_checkpointing", action="store_true",
         help="Whether or not to use gradient checkpointing to save memory at the expense of slower backward pass.")
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
+
+    # parser.add_argument("--lambda_nce", default=10.0, type=float, help="Weight for NCE loss")
 
     args = parser.parse_args()
     return args

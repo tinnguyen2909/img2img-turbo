@@ -17,9 +17,10 @@ from peft.utils import get_peft_model_state_dict
 from cleanfid.fid import get_folder_features, build_feature_extractor, frechet_distance
 import vision_aided_loss
 from model import make_1step_sched
-from cut_turbo import CUT_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae, PatchSampleF, PatchNCELoss
+from cut_turbo import CUT_Turbo, VAE_encode, VAE_decode, initialize_unet, initialize_vae
 from my_utils.training_utils import UnpairedDataset, build_transform, parse_args_unpaired_training
 from my_utils.dino_struct import DinoStructureLoss
+from patch_nce import PatchSampleF, PatchNCELoss
 
 
 def main(args):
@@ -34,24 +35,27 @@ def main(args):
     text_encoder = CLIPTextModel.from_pretrained("stabilityai/sd-turbo", subfolder="text_encoder").cuda()
 
     unet, l_modules_unet_encoder, l_modules_unet_decoder, l_modules_unet_others = initialize_unet(args.lora_rank_unet, return_lora_module_names=True)
-    vae, vae_lora_target_modules = initialize_vae(args.lora_rank_vae, return_lora_module_names=True)
+    vae_a2b, vae_lora_target_modules = initialize_vae(args.lora_rank_vae, return_lora_module_names=True)
 
     weight_dtype = torch.float32
-    vae.to(accelerator.device, dtype=weight_dtype)
+    vae_a2b.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
     unet.to(accelerator.device, dtype=weight_dtype)
     text_encoder.requires_grad_(False)
 
-    # Define NCE layers and initialize PatchSampleF module
-    nce_layers = [4, 8, 12]  # Example layers from UNet hidden states
-    patch_sample = PatchSampleF(nce_layers, use_mlp=True).to(accelerator.device)
-    criterionNCE = PatchNCELoss(nce_layers).to(accelerator.device)
-
+    # In CUT, we only need one discriminator for the target domain B
     if args.gan_disc_type == "vagan_clip":
         net_disc = vision_aided_loss.Discriminator(cv_type='clip', loss_type=args.gan_loss_type, device="cuda")
         net_disc.cv_ensemble.requires_grad_(False)  # Freeze feature extractor
-    else:
-        raise NotImplementedError(f"Discriminator type {args.gan_disc_type} not implemented")
+
+    # Initialize PatchNCE components
+    patch_sample_f = initialize_patchnce(args)
+    patch_sample_f.to(accelerator.device, dtype=weight_dtype)
+    criterionNCE = PatchNCELoss(nce_temp=args.nce_temp, batch_size=args.train_batch_size) if args.lambda_NCE > 0 else None
+    if criterionNCE is not None:
+        criterionNCE.to(accelerator.device)
+
+    crit_idt = torch.nn.L1Loss()
 
     if args.enable_xformers_memory_efficient_attention:
         unet.enable_xformers_memory_efficient_attention()
@@ -62,12 +66,12 @@ def main(args):
     if args.allow_tf32:
         torch.backends.cuda.matmul.allow_tf32 = True
 
-    # Get all trainable parameters
     unet.conv_in.requires_grad_(True)
-    params_gen = CUT_Turbo.get_trainable_params(unet, vae, patch_sample)
+    vae_b2a = copy.deepcopy(vae_a2b)  # We still need this for parameter initialization
+    params_gen = CUT_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a, patch_sample_f)
 
-    vae_enc = VAE_encode(vae)
-    vae_dec = VAE_decode(vae)
+    vae_enc = VAE_encode(vae_a2b)
+    vae_dec = VAE_decode(vae_a2b)
 
     optimizer_gen = torch.optim.AdamW(params_gen, lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay, eps=args.adam_epsilon,)
@@ -89,7 +93,7 @@ def main(args):
         l_images_tgt_test.extend(glob(os.path.join(args.dataset_folder, "test_B", ext)))
     l_images_src_test, l_images_tgt_test = sorted(l_images_src_test), sorted(l_images_tgt_test)
 
-    # Make the reference FID statistics
+    # make the reference FID statistics
     if accelerator.is_main_process:
         feat_model = build_feature_extractor("clean", "cuda", use_dataparallel=False)
         """
@@ -97,13 +101,13 @@ def main(args):
         """
         output_dir_ref = os.path.join(args.output_dir, "fid_reference_a2b")
         os.makedirs(output_dir_ref, exist_ok=True)
-        # Transform all images according to the validation transform and save them
+        # transform all images according to the validation transform and save them
         for _path in tqdm(l_images_tgt_test):
             _img = T_val(Image.open(_path).convert("RGB"))
             outf = os.path.join(output_dir_ref, os.path.basename(_path)).replace(".jpg", ".png")
             if not os.path.exists(outf):
                 _img.save(outf)
-        # Compute the features for the reference images
+        # compute the features for the reference images
         ref_features = get_folder_features(output_dir_ref, model=feat_model, num_workers=0, num=None,
                         shuffle=False, seed=0, batch_size=8, device=torch.device("cuda"),
                         mode="clean", custom_fn_resize=None, description="", verbose=True,
@@ -125,14 +129,14 @@ def main(args):
 
     fixed_a2b_tokens = tokenizer(fixed_caption_tgt, max_length=tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt").input_ids[0]
     fixed_a2b_emb_base = text_encoder(fixed_a2b_tokens.cuda().unsqueeze(0))[0].detach()
-    del text_encoder, tokenizer  # Free up some memory
+    del text_encoder, tokenizer  # free up some memory
 
-    unet, vae_enc, vae_dec, net_disc, patch_sample = accelerator.prepare(unet, vae_enc, vae_dec, net_disc, patch_sample)
+    unet, vae_enc, vae_dec, net_disc, patch_sample_f, criterionNCE = accelerator.prepare(
+        unet, vae_enc, vae_dec, net_disc, patch_sample_f, criterionNCE
+    )
     net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc = accelerator.prepare(
         net_lpips, optimizer_gen, optimizer_disc, train_dataloader, lr_scheduler_gen, lr_scheduler_disc
     )
-    criterionNCE = accelerator.prepare(criterionNCE)
-    
     if accelerator.is_main_process:
         accelerator.init_trackers(args.tracker_project_name, config=dict(vars(args)))
 
@@ -140,15 +144,14 @@ def main(args):
     global_step = 0
     progress_bar = tqdm(range(0, args.max_train_steps), initial=global_step, desc="Steps",
         disable=not accelerator.is_local_main_process,)
-    
-    # Turn off efficient attention for the discriminator
+    # turn off eff. attn for the disc
     for name, module in net_disc.named_modules():
         if "attn" in name:
             module.fused_attn = False
 
     for epoch in range(first_epoch, args.max_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            l_acc = [unet, net_disc, vae_enc, vae_dec, patch_sample]
+            l_acc = [unet, net_disc, vae_enc, vae_dec, patch_sample_f]
             with accelerator.accumulate(*l_acc):
                 img_a = batch["pixel_values_src"].to(dtype=weight_dtype)
                 img_b = batch["pixel_values_tgt"].to(dtype=weight_dtype)
@@ -158,16 +161,94 @@ def main(args):
                 timesteps = torch.tensor([noise_scheduler_1step.config.num_train_timesteps - 1] * bsz, device=img_a.device).long()
 
                 """
-                Generator Forward Pass
+                PatchNCE Objective
                 """
-                # A -> fake B
-                fake_b, enc_src = CUT_Turbo.forward_generator(img_a, vae_enc, unet, vae_dec, noise_scheduler_1step, timesteps, fixed_a2b_emb)
+                # Generate fake B from A with features using hooks
+                fake_b, features_real_a = CUT_Turbo.forward_with_networks(
+                    img_a, 
+                    "a2b", 
+                    vae_enc, 
+                    unet, 
+                    vae_dec, 
+                    noise_scheduler_1step, 
+                    timesteps, 
+                    fixed_a2b_emb,
+                    return_features=True
+                )
+                
+                # Get features from fake B using the same hooks
+                _, features_fake_b = CUT_Turbo.forward_with_networks(
+                    fake_b,
+                    "a2b",
+                    vae_enc,
+                    unet,
+                    vae_dec,
+                    noise_scheduler_1step,
+                    timesteps,
+                    fixed_a2b_emb,
+                    return_features=True
+                )
+                
+                # Calculate PatchNCE loss
+                # Process features with correct shapes for PatchSampleF
+                processed_features_real_a = []
+                processed_features_fake_b = []
+                
+                for idx in range(len(features_real_a)):
+                    feat_q = features_real_a[idx]
+                    feat_k = features_fake_b[idx]
+                    
+                    # Make sure features are in correct shape (B, C, H, W)
+                    if len(feat_q.shape) == 3:  # (B, L, C) -> (B, C, H, W)
+                        h = w = int(np.sqrt(feat_q.shape[1]))
+                        feat_q = feat_q.permute(0, 2, 1).reshape(feat_q.shape[0], feat_q.shape[2], h, w)
+                        feat_k = feat_k.permute(0, 2, 1).reshape(feat_k.shape[0], feat_k.shape[2], h, w)
+                    
+                    # Ensure same device
+                    feat_q = feat_q.to(device=accelerator.device)
+                    feat_k = feat_k.to(device=accelerator.device)
+                    
+                    processed_features_real_a.append(feat_q)
+                    processed_features_fake_b.append(feat_k)
+                
+                # Sample patches from all features at once
+                feat_q_pool, patch_ids = patch_sample_f(processed_features_real_a, num_patches=args.num_patches, patch_ids=None)
+                feat_k_pool, _ = patch_sample_f(processed_features_fake_b, num_patches=args.num_patches, patch_ids=patch_ids)
+                
+                # Calculate NCE loss across all features
+                loss_nce = 0.0
+                for q, k in zip(feat_q_pool, feat_k_pool):
+                    loss_nce += criterionNCE(q, k).mean()
+                
+                loss_nce = loss_nce * args.lambda_NCE
+                
+                # Backward pass for NCE loss
+                accelerator.backward(loss_nce, retain_graph=True)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
+    
+                optimizer_gen.step()
+                lr_scheduler_gen.step()
+                optimizer_gen.zero_grad()
 
                 """
-                Identity Loss
+                Generator Objective (GAN) - only for A to B direction
                 """
-                idt_b = CUT_Turbo.forward_generator(img_b, vae_enc, unet, vae_dec, noise_scheduler_1step, timesteps, fixed_a2b_emb)[0]
-                loss_idt = torch.nn.functional.l1_loss(idt_b, img_b) * args.lambda_idt
+                # We already have fake_b from the PatchNCE step
+                loss_gan = net_disc(fake_b, for_G=True).mean() * args.lambda_gan
+                accelerator.backward(loss_gan, retain_graph=False)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
+                optimizer_gen.step()
+                lr_scheduler_gen.step()
+                optimizer_gen.zero_grad()
+                optimizer_disc.zero_grad()
+
+                """
+                Identity Objective - only for A to B direction
+                """
+                idt_b = CUT_Turbo.forward_with_networks(img_b, "a2b", vae_enc, unet, vae_dec, noise_scheduler_1step, timesteps, fixed_a2b_emb)
+                loss_idt = crit_idt(idt_b, img_b) * args.lambda_idt
                 loss_idt += net_lpips(idt_b, img_b).mean() * args.lambda_idt_lpips
                 accelerator.backward(loss_idt, retain_graph=False)
                 if accelerator.sync_gradients:
@@ -177,31 +258,7 @@ def main(args):
                 optimizer_gen.zero_grad()
 
                 """
-                PatchNCE Contrastive Loss
-                """
-                loss_nce = CUT_Turbo.compute_nce_loss(img_a, fake_b, enc_src, unet, patch_sample, criterionNCE, timesteps, fixed_a2b_emb)
-                loss_nce = loss_nce * args.lambda_nce
-                accelerator.backward(loss_nce, retain_graph=False)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
-                optimizer_gen.step()
-                lr_scheduler_gen.step()
-                optimizer_gen.zero_grad()
-
-                """
-                GAN Loss for Generator
-                """
-                loss_gan_g = net_disc(fake_b, for_G=True).mean() * args.lambda_gan
-                accelerator.backward(loss_gan_g, retain_graph=False)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(params_gen, args.max_grad_norm)
-                optimizer_gen.step()
-                lr_scheduler_gen.step()
-                optimizer_gen.zero_grad()
-                optimizer_disc.zero_grad()
-
-                """
-                Discriminator for fake images
+                Discriminator for fake B
                 """
                 loss_D_fake = net_disc(fake_b.detach(), for_real=False).mean() * args.lambda_gan
                 accelerator.backward(loss_D_fake, retain_graph=False)
@@ -212,7 +269,7 @@ def main(args):
                 optimizer_disc.zero_grad()
 
                 """
-                Discriminator for real images
+                Discriminator for real B
                 """
                 loss_D_real = net_disc(img_b, for_real=True).mean() * args.lambda_gan
                 accelerator.backward(loss_D_real, retain_graph=False)
@@ -224,7 +281,7 @@ def main(args):
 
             logs = {}
             logs["nce_loss"] = loss_nce.detach().item()
-            logs["gan_g"] = loss_gan_g.detach().item()
+            logs["gan"] = loss_gan.detach().item()
             logs["disc"] = loss_D_fake.detach().item() + loss_D_real.detach().item()
             logs["idt"] = loss_idt.detach().item()
 
@@ -236,8 +293,6 @@ def main(args):
                     eval_unet = accelerator.unwrap_model(unet)
                     eval_vae_enc = accelerator.unwrap_model(vae_enc)
                     eval_vae_dec = accelerator.unwrap_model(vae_dec)
-                    eval_patch_sample = accelerator.unwrap_model(patch_sample)
-                    
                     if global_step % args.viz_freq == 1:
                         for tracker in accelerator.trackers:
                             if tracker.name == "wandb":
@@ -246,9 +301,9 @@ def main(args):
                                 log_dict = {
                                     "train/real_a": [wandb.Image(viz_img_a[idx].float().detach().cpu(), caption=f"idx={idx}") for idx in range(bsz)],
                                     "train/real_b": [wandb.Image(viz_img_b[idx].float().detach().cpu(), caption=f"idx={idx}") for idx in range(bsz)],
+                                    "train/fake_b": [wandb.Image(fake_b[idx].float().detach().cpu(), caption=f"idx={idx}") for idx in range(bsz)],
+                                    "train/idt_b": [wandb.Image(idt_b[idx].float().detach().cpu(), caption=f"idx={idx}") for idx in range(bsz)]
                                 }
-                                log_dict["train/fake_b"] = [wandb.Image(fake_b[idx].float().detach().cpu(), caption=f"idx={idx}") for idx in range(bsz)]
-                                log_dict["train/idt_b"] = [wandb.Image(idt_b[idx].float().detach().cpu(), caption=f"idx={idx}") for idx in range(bsz)]
                                 tracker.log(log_dict)
                                 gc.collect()
                                 torch.cuda.empty_cache()
@@ -267,50 +322,9 @@ def main(args):
                         sd["vae_lora_target_modules"] = vae_lora_target_modules
                         sd["sd_vae_enc"] = eval_vae_enc.state_dict()
                         sd["sd_vae_dec"] = eval_vae_dec.state_dict()
-                        sd["sd_patch_sample"] = eval_patch_sample.state_dict()
                         torch.save(sd, outf)
                         gc.collect()
                         torch.cuda.empty_cache()
-
-                    # Compute val FID and DINO-Struct scores
-                    if global_step % args.validation_steps == 1:
-                        _timesteps = torch.tensor([noise_scheduler_1step.config.num_train_timesteps - 1] * 1, device="cuda").long()
-                        net_dino = DinoStructureLoss()
-                        """
-                        Evaluate "A->B"
-                        """
-                        fid_output_dir = os.path.join(args.output_dir, f"fid-{global_step}/samples_a2b")
-                        os.makedirs(fid_output_dir, exist_ok=True)
-                        l_dino_scores_a2b = []
-                        # Get val input images from domain a
-                        for idx, input_img_path in enumerate(tqdm(l_images_src_test)):
-                            if idx > args.validation_num_images and args.validation_num_images > 0:
-                                break
-                            outf = os.path.join(fid_output_dir, f"{idx}.png")
-                            with torch.no_grad():
-                                input_img = T_val(Image.open(input_img_path).convert("RGB"))
-                                img_a = transforms.ToTensor()(input_img)
-                                img_a = transforms.Normalize([0.5], [0.5])(img_a).unsqueeze(0).cuda()
-                                eval_fake_b = CUT_Turbo.forward_generator(img_a, eval_vae_enc, eval_unet,
-                                    eval_vae_dec, noise_scheduler_1step, _timesteps, fixed_a2b_emb[0:1])[0]
-                                eval_fake_b_pil = transforms.ToPILImage()(eval_fake_b[0] * 0.5 + 0.5)
-                                eval_fake_b_pil.save(outf)
-                                a = net_dino.preprocess(input_img).unsqueeze(0).cuda()
-                                b = net_dino.preprocess(eval_fake_b_pil).unsqueeze(0).cuda()
-                                dino_ssim = net_dino.calculate_global_ssim_loss(a, b).item()
-                                l_dino_scores_a2b.append(dino_ssim)
-                        dino_score_a2b = np.mean(l_dino_scores_a2b)
-                        gen_features = get_folder_features(fid_output_dir, model=feat_model, num_workers=0, num=None,
-                            shuffle=False, seed=0, batch_size=8, device=torch.device("cuda"),
-                            mode="clean", custom_fn_resize=None, description="", verbose=True,
-                            custom_image_tranform=None)
-                        ed_mu, ed_sigma = np.mean(gen_features, axis=0), np.cov(gen_features, rowvar=False)
-                        score_fid_a2b = frechet_distance(a2b_ref_mu, a2b_ref_sigma, ed_mu, ed_sigma)
-                        print(f"step={global_step}, fid(a2b)={score_fid_a2b:.2f}, dino(a2b)={dino_score_a2b:.3f}")
-
-                        logs["val/fid_a2b"] = score_fid_a2b
-                        logs["val/dino_struct_a2b"] = dino_score_a2b
-                        del net_dino  # Free up memory
 
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
@@ -318,9 +332,16 @@ def main(args):
                 break
 
 
+def initialize_patchnce(args):
+    """Initialize the PatchSampleF network for PatchNCE loss"""
+    patch_sample_f = PatchSampleF(use_mlp=True, nc=256, gpu_ids=[0])  # Use GPU
+    return patch_sample_f
+
+
 if __name__ == "__main__":
-    parser = parse_args_unpaired_training()
-    # Add CUT-specific arguments
-    parser.add_argument("--lambda_nce", default=10.0, type=float, help="Weight for NCE loss")
-    args = parser.parse_args()
-    main(args) 
+    args = parse_args_unpaired_training()
+    # Add PatchNCE related arguments
+    args.lambda_NCE = getattr(args, 'lambda_NCE', 1.0)  # Weight for PatchNCE loss
+    args.nce_temp = getattr(args, 'nce_temp', 0.07)  # Temperature for NCE loss
+    args.num_patches = getattr(args, 'num_patches', 256)  # Number of patches for NCE
+    main(args)
