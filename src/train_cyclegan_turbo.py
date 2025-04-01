@@ -120,8 +120,8 @@ def main(args):
         for root, _, _ in os.walk(args.path_B):
             l_images_tgt_test.extend(glob(os.path.join(root, ext)))
     l_images_src_test, l_images_tgt_test = sorted(l_images_src_test), sorted(l_images_tgt_test)
-    l_images_src_test = random.sample(l_images_src_test, 200)
-    l_images_tgt_test = random.sample(l_images_tgt_test, 200)
+    l_images_src_test = random.sample(l_images_src_test, 50)
+    l_images_tgt_test = random.sample(l_images_tgt_test, 50)
 
     # make the reference FID statistics
     if accelerator.is_main_process:
