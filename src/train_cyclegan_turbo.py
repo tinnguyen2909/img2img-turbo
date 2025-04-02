@@ -93,9 +93,19 @@ def main(args):
     optimizer_gen = torch.optim.AdamW(CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a), lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay, eps=args.adam_epsilon,)
 
+    # Print number of trainable parameters
+    trainable_params = CycleGAN_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a)
+    num_trainable_params = sum(p.numel() for p in trainable_params)
+    print(f"Number of trainable parameters: {num_trainable_params:,}")
+
     params_disc = list(net_disc_a.parameters()) + list(net_disc_b.parameters())
     optimizer_disc = torch.optim.AdamW(params_disc, lr=args.learning_rate, betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay, eps=args.adam_epsilon,)
+    
+    # Print number of discriminator parameters
+    num_disc_params = sum(p.numel() for p in params_disc)
+    print(f"Number of discriminator parameters: {num_disc_params:,}")
+    print(f"Total trainable parameters: {num_trainable_params + num_disc_params:,}")
 
     dataset_train = UnpairedDataset_CutTurbo(A=args.path_A, B=args.path_B, image_prep=args.train_img_prep, tokenizer=tokenizer, max_pairs=None)
     # dataset_train = UnpairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_img_prep, split="train", tokenizer=tokenizer)
