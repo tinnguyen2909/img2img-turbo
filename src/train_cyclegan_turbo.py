@@ -346,7 +346,7 @@ def main(args):
                         torch.cuda.empty_cache()
 
                     # compute val FID and DINO-Struct scores
-                    if global_step % args.validation_steps == 1:
+                    if False and global_step % args.validation_steps == 1:
                         _timesteps = torch.tensor([noise_scheduler_1step.config.num_train_timesteps - 1] * 1, device="cuda").long()
                         net_dino = DinoStructureLoss()
                         """
