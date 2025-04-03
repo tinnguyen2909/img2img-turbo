@@ -523,8 +523,35 @@ class UnpairedDataset_CutTurbo(torch.utils.data.Dataset):
         else:
             img_path_src = random.choice(self.l_imgs_src)
         img_path_tgt = random.choice(self.l_imgs_tgt)
-        img_pil_src = Image.open(img_path_src).convert("RGB")
-        img_pil_tgt = Image.open(img_path_tgt).convert("RGB")
+        
+        # Load source image
+        img_pil_src = Image.open(img_path_src)
+        # Handle alpha channel by compositing onto white background
+        if img_pil_src.mode in ('RGBA', 'LA') or (img_pil_src.mode == 'P' and 'transparency' in img_pil_src.info):
+            # Create a white background image
+            white_bg = Image.new('RGB', img_pil_src.size, (255, 255, 255))
+            # Paste the image with alpha onto the white background
+            if img_pil_src.mode == 'P':
+                img_pil_src = img_pil_src.convert('RGBA')
+            white_bg.paste(img_pil_src, (0, 0), img_pil_src)
+            img_pil_src = white_bg
+        else:
+            img_pil_src = img_pil_src.convert('RGB')
+            
+        # Load target image
+        img_pil_tgt = Image.open(img_path_tgt)
+        # Handle alpha channel by compositing onto white background
+        if img_pil_tgt.mode in ('RGBA', 'LA') or (img_pil_tgt.mode == 'P' and 'transparency' in img_pil_tgt.info):
+            # Create a white background image
+            white_bg = Image.new('RGB', img_pil_tgt.size, (255, 255, 255))
+            # Paste the image with alpha onto the white background
+            if img_pil_tgt.mode == 'P':
+                img_pil_tgt = img_pil_tgt.convert('RGBA')
+            white_bg.paste(img_pil_tgt, (0, 0), img_pil_tgt)
+            img_pil_tgt = white_bg
+        else:
+            img_pil_tgt = img_pil_tgt.convert('RGB')
+        
         img_t_src = F.to_tensor(self.T(img_pil_src))
         img_t_tgt = F.to_tensor(self.T(img_pil_tgt))
         img_t_src = F.normalize(img_t_src, mean=[0.5], std=[0.5])
