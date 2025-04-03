@@ -352,6 +352,19 @@ def main(args):
                         sd["sd_vae_enc"] = eval_vae_enc.state_dict()
                         sd["sd_vae_dec"] = eval_vae_dec.state_dict()
                         torch.save(sd, outf)
+                        
+                        # Keep only the 3 latest checkpoints
+                        checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
+                        checkpoints = glob(os.path.join(checkpoint_dir, "model_*.pkl"))
+                        if len(checkpoints) > 3:
+                            # Sort by creation time (oldest first)
+                            checkpoints.sort(key=os.path.getctime)
+                            # Delete all but the 3 newest files
+                            for old_checkpoint in checkpoints[:-3]:
+                                if os.path.exists(old_checkpoint):
+                                    print(f"Removing old checkpoint: {old_checkpoint}")
+                                    os.remove(old_checkpoint)
+                        
                         gc.collect()
                         torch.cuda.empty_cache()
 
