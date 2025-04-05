@@ -356,7 +356,7 @@ def main(args):
                         # Keep only the 3 latest checkpoints
                         checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
                         checkpoints = glob(os.path.join(checkpoint_dir, "model_*.pkl"))
-                        if len(checkpoints) > 3:
+                        if len(checkpoints) > 2:
                             # Sort by creation time (oldest first)
                             checkpoints.sort(key=os.path.getctime)
                             # Delete all but the 3 newest files
