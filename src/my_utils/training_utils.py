@@ -478,6 +478,9 @@ class UnpairedDataset_CutTurbo(torch.utils.data.Dataset):
             # Limit the number of source and target images
             self.l_imgs_src = self.l_imgs_src[:self.max_pairs]
             self.l_imgs_tgt = self.l_imgs_tgt[:self.max_pairs]
+
+        random.shuffle(self.l_imgs_src)
+        random.shuffle(self.l_imgs_tgt)
             
         self.T = build_transform(image_prep)
 
