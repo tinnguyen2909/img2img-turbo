@@ -219,7 +219,8 @@ class CUT_Turbo(torch.nn.Module):
         vae_lora_config = LoraConfig(r=sd["rank_vae"], init_lora_weights="gaussian", target_modules=sd["vae_lora_target_modules"])
         self.vae.add_adapter(vae_lora_config, adapter_name="vae_skip")
         self.vae.decoder.gamma = 1
-        self.vae_b2a = copy.deepcopy(self.vae)
+        # self.vae_b2a = copy.deepcopy(self.vae)
+        self.vae_b2a = None
         self.vae_enc = VAE_encode(self.vae, vae_b2a=self.vae_b2a)
         self.vae_enc.load_state_dict(sd["sd_vae_enc"])
         self.vae_dec = VAE_decode(self.vae, vae_b2a=self.vae_b2a)
@@ -336,30 +337,30 @@ class CUT_Turbo(torch.nn.Module):
                 param_set.add(param)
 
         # Add all vae_b2a parameters (only for initialization; not used in CUT)
-        for n, p in vae_b2a.named_parameters():
-            if "lora" in n and "vae_skip" in n and p.requires_grad and p not in param_set:
-                params_gen.append(p)
-                param_set.add(p)
+        # for n, p in vae_b2a.named_parameters():
+        #     if "lora" in n and "vae_skip" in n and p.requires_grad and p not in param_set:
+        #         params_gen.append(p)
+        #         param_set.add(p)
                 
-        for param in vae_b2a.decoder.skip_conv_1.parameters():
-            if param not in param_set:
-                params_gen.append(param)
-                param_set.add(param)
+        # for param in vae_b2a.decoder.skip_conv_1.parameters():
+        #     if param not in param_set:
+        #         params_gen.append(param)
+        #         param_set.add(param)
                 
-        for param in vae_b2a.decoder.skip_conv_2.parameters():
-            if param not in param_set:
-                params_gen.append(param)
-                param_set.add(param)
+        # for param in vae_b2a.decoder.skip_conv_2.parameters():
+        #     if param not in param_set:
+        #         params_gen.append(param)
+        #         param_set.add(param)
                 
-        for param in vae_b2a.decoder.skip_conv_3.parameters():
-            if param not in param_set:
-                params_gen.append(param)
-                param_set.add(param)
+        # for param in vae_b2a.decoder.skip_conv_3.parameters():
+        #     if param not in param_set:
+        #         params_gen.append(param)
+        #         param_set.add(param)
                 
-        for param in vae_b2a.decoder.skip_conv_4.parameters():
-            if param not in param_set:
-                params_gen.append(param)
-                param_set.add(param)
+        # for param in vae_b2a.decoder.skip_conv_4.parameters():
+        #     if param not in param_set:
+        #         params_gen.append(param)
+        #         param_set.add(param)
         
         # Add patch_sample_f parameters for contrastive learning
         if patch_sample_f is not None:
