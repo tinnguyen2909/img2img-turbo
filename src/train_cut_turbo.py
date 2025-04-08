@@ -39,6 +39,43 @@ def main(args):
     unet, l_modules_unet_encoder, l_modules_unet_decoder, l_modules_unet_others = initialize_unet(args.lora_rank_unet, return_lora_module_names=True)
     vae_a2b, vae_lora_target_modules = initialize_vae(args.lora_rank_vae, return_lora_module_names=True)
 
+    # Load checkpoint if continuing training
+    patch_sample_f = initialize_patchnce(args)
+    
+    if args.continue_train and args.pretrained_model_name_or_path:
+        if accelerator.is_main_process:
+            print(f"Loading checkpoint from {args.pretrained_model_name_or_path}")
+        
+        # Create CUT_Turbo instance with the pretrained model
+        model = CUT_Turbo(pretrained_path=args.pretrained_model_name_or_path)
+        
+        # Extract the components we need for training
+        unet = model.unet
+        vae_a2b = model.vae
+        vae_b2a = model.vae # Only need one VAE in CUT
+        vae_enc = model.vae_enc
+        vae_dec = model.vae_dec
+        
+        # Load PatchSampleF if available in checkpoint
+        checkpoint = torch.load(args.pretrained_model_name_or_path, map_location="cpu")
+        if "patch_sample_f" in checkpoint:
+            patch_sample_f.load_state_dict(checkpoint["patch_sample_f"])
+            if accelerator.is_main_process:
+                print("Successfully loaded PatchSampleF from checkpoint")
+        
+        # Verify that LoRA ranks match
+        if checkpoint["rank_unet"] != args.lora_rank_unet:
+            raise ValueError(f"Checkpoint LoRA rank ({checkpoint['rank_unet']}) does not match current setting ({args.lora_rank_unet})")
+        if checkpoint["rank_vae"] != args.lora_rank_vae:
+            raise ValueError(f"Checkpoint VAE LoRA rank ({checkpoint['rank_vae']}) does not match current setting ({args.lora_rank_vae})")
+        
+        if accelerator.is_main_process:
+            print("Successfully loaded checkpoint")
+    else:
+        vae_b2a = copy.deepcopy(vae_a2b)  # We still need this for parameter initialization
+        vae_enc = VAE_encode(vae_a2b)
+        vae_dec = VAE_decode(vae_a2b)
+
     weight_dtype = torch.float32
     vae_a2b.to(accelerator.device, dtype=weight_dtype)
     text_encoder.to(accelerator.device, dtype=weight_dtype)
@@ -51,7 +88,6 @@ def main(args):
         net_disc.cv_ensemble.requires_grad_(False)  # Freeze feature extractor
 
     # Initialize PatchNCE components
-    patch_sample_f = initialize_patchnce(args)
     patch_sample_f.to(accelerator.device, dtype=weight_dtype)
     criterionNCE = PatchNCELoss(nce_temp=args.nce_temp, batch_size=args.train_batch_size) if args.lambda_NCE > 0 else None
     if criterionNCE is not None:
@@ -69,7 +105,6 @@ def main(args):
         torch.backends.cuda.matmul.allow_tf32 = True
 
     unet.conv_in.requires_grad_(True)
-    vae_b2a = copy.deepcopy(vae_a2b)  # We still need this for parameter initialization
     params_gen = CUT_Turbo.get_traininable_params(unet, vae_a2b, vae_b2a, patch_sample_f)
 
     vae_enc = VAE_encode(vae_a2b)
@@ -383,4 +418,6 @@ if __name__ == "__main__":
     # Add new identity loss parameters
     args.lambda_idt_A = getattr(args, 'lambda_idt_A', 1.0)
     args.lambda_idt_A_lpips = getattr(args, 'lambda_idt_A_lpips', 1.0)
+    # Add continue_train parameter
+    args.continue_train = getattr(args, 'continue_train', False)
     main(args)
