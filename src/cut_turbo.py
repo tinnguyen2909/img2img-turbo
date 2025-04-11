@@ -230,10 +230,24 @@ class CUT_Turbo(torch.nn.Module):
         if "patch_sample_f" in sd:
             # If there are MLPs in the state dict, make sure we initialize the MLPs first
             if any("mlp" in k for k in sd["patch_sample_f"].keys()):
-                # Create dummy features to initialize MLPs
-                dummy_features = [torch.randn(1, 256, 8, 8).cuda() for _ in range(3)]
+                # Identify the number of MLPs and their input dimensions from the weights
+                mlp_layers = {}
+                for key in sd["patch_sample_f"]:
+                    if "mlp_" in key and ".0.weight" in key:
+                        mlp_idx = int(key.split('.')[0].split('_')[1])
+                        input_dim = sd["patch_sample_f"][key].size(1)
+                        mlp_layers[mlp_idx] = input_dim
+                
+                # Create dynamic features based on the dimensions found
+                dummy_features = []
+                for idx in sorted(mlp_layers.keys()):
+                    # Use a small spatial size (e.g., 4x4) for efficiency
+                    feature_shape = (1, mlp_layers[idx], 4, 4)
+                    dummy_features.append(torch.randn(feature_shape).cuda())
+                
                 # This will trigger MLP creation
-                self.patch_sample_f(dummy_features, num_patches=1) 
+                self.patch_sample_f(dummy_features, num_patches=1)
+            
             # Now load the state dict
             self.patch_sample_f.load_state_dict(sd["patch_sample_f"])
 

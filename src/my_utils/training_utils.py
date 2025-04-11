@@ -182,6 +182,8 @@ def parse_args_unpaired_training():
     parser.add_argument("--path_A", type=str, required=False)
     parser.add_argument("--path_B", type=str, required=False)
     parser.add_argument("--max_pairs", type=int, default=None)
+    parser.add_argument("--lambda_idt_A", default=1.0, type=float)
+    parser.add_argument("--lambda_idt_A_lpips", default=3.0, type=float)
     args = parser.parse_args()
     return args
 
