@@ -135,7 +135,7 @@ class PatchSampleF(nn.Module):
         init_net(self, self.init_type, self.init_gain, self.gpu_ids)
         self.mlp_init = True
 
-    def forward(self, feats, num_patches=64, patch_ids=None):
+    def forward(self, feats, num_patches=256, patch_ids=None):
         return_ids = []
         return_feats = []
         if self.use_mlp and not self.mlp_init:

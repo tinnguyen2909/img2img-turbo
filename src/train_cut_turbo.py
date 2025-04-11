@@ -56,13 +56,13 @@ def main(args):
         vae_enc = model.vae_enc
         vae_dec = model.vae_dec
         
-        # Load PatchSampleF if available in checkpoint
+        # # Load PatchSampleF if available in checkpoint
         checkpoint = torch.load(args.pretrained_model_name_or_path, map_location="cpu")
-        if "patch_sample_f" in checkpoint:
-            patch_sample_f.load_state_dict(checkpoint["patch_sample_f"])
-            if accelerator.is_main_process:
-                print("Successfully loaded PatchSampleF from checkpoint")
-        
+        # if "patch_sample_f" in checkpoint:
+        #     patch_sample_f.load_state_dict(checkpoint["patch_sample_f"])
+        #     if accelerator.is_main_process:
+        #         print("Successfully loaded PatchSampleF from checkpoint")
+        patch_sample_f = model.patch_sample_f
         # Verify that LoRA ranks match
         if checkpoint["rank_unet"] != args.lora_rank_unet:
             raise ValueError(f"Checkpoint LoRA rank ({checkpoint['rank_unet']}) does not match current setting ({args.lora_rank_unet})")

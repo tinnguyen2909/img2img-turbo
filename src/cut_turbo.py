@@ -246,7 +246,7 @@ class CUT_Turbo(torch.nn.Module):
                     dummy_features.append(torch.randn(feature_shape).cuda())
                 
                 # This will trigger MLP creation
-                self.patch_sample_f(dummy_features, num_patches=1)
+                self.patch_sample_f(dummy_features)
             
             # Now load the state dict
             self.patch_sample_f.load_state_dict(sd["patch_sample_f"])
