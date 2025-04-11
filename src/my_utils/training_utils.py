@@ -184,6 +184,9 @@ def parse_args_unpaired_training():
     parser.add_argument("--max_pairs", type=int, default=None)
     parser.add_argument("--lambda_idt_A", default=1.0, type=float)
     parser.add_argument("--lambda_idt_A_lpips", default=3.0, type=float)
+    parser.add_argument("--lambda_NCE", default=5.0, type=float)
+    parser.add_argument("--nce_temp", default=0.07, type=float)
+    parser.add_argument("--num_patches", default=256, type=int)
     args = parser.parse_args()
     return args
 
