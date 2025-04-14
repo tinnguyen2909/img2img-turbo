@@ -3,7 +3,7 @@ import argparse
 from PIL import Image
 import torch
 from torchvision import transforms
-from cyclegan_turbo import CycleGAN_Turbo
+from cut_turbo import CUT_Turbo
 from my_utils.training_utils import build_transform
 from glob import glob
 
@@ -38,7 +38,7 @@ if __name__ == "__main__":
         assert args.direction is None, 'direction is not required when loading a pretrained model.'
 
     # Initialize the model
-    model = CycleGAN_Turbo(pretrained_name=args.model_name, pretrained_path=args.model_path)
+    model = CUT_Turbo(pretrained_name=args.model_name, pretrained_path=args.model_path)
     model.eval()
     model.unet.enable_xformers_memory_efficient_attention()
     if args.use_fp16:
@@ -87,4 +87,4 @@ if __name__ == "__main__":
         # Process each image
         for image_path in image_files:
             bname = process_image(image_path)
-            print(f"Processed: {image_path} -> {os.path.join(args.output_dir, bname)}")
+            print(f"Processed: {image_path} -> {os.path.join(args.output_dir, bname)}") 
