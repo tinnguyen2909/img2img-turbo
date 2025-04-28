@@ -72,10 +72,10 @@ if __name__ == "__main__":
         process_image(args.input_image)
         print(f"Processed: {args.input_image}")
     else:
-        # Process all images in the directory
+        # Process all images in the directory and its subdirectories
         image_files = []
         for ext in ["*.jpg", "*.jpeg", "*.png", "*.webp"]:
-            image_files.extend(glob(os.path.join(args.input_dir, ext)))
+            image_files.extend(glob(os.path.join(args.input_dir, f"**/{ext}"), recursive=True))
         
         # Sort files for consistency
         image_files = sorted(image_files)
@@ -84,7 +84,12 @@ if __name__ == "__main__":
         if args.max_images is not None:
             image_files = image_files[:args.max_images]
         
+        total_images = len(image_files)
+        print(f"Found {total_images} images to process")
+        
         # Process each image
-        for image_path in image_files:
+        for i, image_path in enumerate(image_files, 1):
             bname = process_image(image_path)
-            print(f"Processed: {image_path} -> {os.path.join(args.output_dir, bname)}") 
+            print(f"[{i}/{total_images}] Processed: {image_path} -> {os.path.join(args.output_dir, bname)}")
+        
+        print(f"Completed processing {total_images} images") 

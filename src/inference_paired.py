@@ -81,7 +81,8 @@ if __name__ == "__main__":
         # Process all images in the directory
         image_files = []
         for ext in ["*.jpg", "*.jpeg", "*.png", "*.webp"]:
-            image_files.extend(glob(os.path.join(args.input_dir, ext)))
+            image_files.extend(glob(os.path.join(args.input_dir, f"**/{ext}"), recursive=True))
+            # image_files.extend(glob(os.path.join(args.input_dir, ext)))
         
         # Sort files for consistency
         image_files = sorted(image_files)

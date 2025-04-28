@@ -246,6 +246,10 @@ def build_transform(image_prep):
         T = transforms.Compose([
             transforms.Resize((256, 256), interpolation=Image.LANCZOS)
         ])
+    elif image_prep in ["resize_768", "resize_768x768"]:
+        T = transforms.Compose([
+            transforms.Resize((768, 768), interpolation=Image.LANCZOS)
+        ])
     elif image_prep in ["resize_512", "resize_512x512"]:
         T = transforms.Compose([
             transforms.Resize((512, 512), interpolation=Image.LANCZOS)
