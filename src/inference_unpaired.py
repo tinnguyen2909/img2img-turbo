@@ -89,7 +89,11 @@ if __name__ == "__main__":
         total_images = len(image_files)
         print(f"Starting processing of {total_images} images...")
         for i, image_path in enumerate(image_files):
-            if i < 2900:
+            # if i < 2900:
+            #     continue
+            try:
+                bname = process_image(image_path)
+            except Exception as e:
+                print(f"Error processing {image_path}: {e}")
                 continue
-            bname = process_image(image_path)
             print(f"Processed [{i+1}/{total_images}]: {image_path} -> {os.path.join(args.output_dir, bname)}")
