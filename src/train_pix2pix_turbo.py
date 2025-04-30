@@ -45,9 +45,26 @@ def main(args):
         os.makedirs(os.path.join(args.output_dir, "checkpoints"), exist_ok=True)
         os.makedirs(os.path.join(args.output_dir, "eval"), exist_ok=True)
 
-    if args.pretrained_model_name_or_path == "stabilityai/sd-turbo":
-        net_pix2pix = Pix2Pix_Turbo(lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
-        net_pix2pix.set_train()
+    # Initialize the Pix2Pix_Turbo model
+    if args.continue_train:
+        assert args.pretrained_model_name_or_path is not None, (
+            "Must provide path to checkpoint using --pretrained_model_name_or_path when --continue_training is set."
+        )
+        assert os.path.exists(args.pretrained_model_name_or_path), (
+            f"Checkpoint path {args.pretrained_model_name_or_path} not found."
+        )
+        net_pix2pix = Pix2Pix_Turbo(pretrained_path=args.pretrained_model_name_or_path,
+                                    lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
+        print(f"Resuming training from checkpoint: {args.pretrained_model_name_or_path}")
+    else:
+        net_pix2pix = Pix2Pix_Turbo(pretrained_name=args.pretrained_model_name_or_path,
+                                    lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
+        if args.pretrained_model_name_or_path:
+            print(f"Starting training from pretrained model: {args.pretrained_model_name_or_path}")
+        else:
+            print("Starting training from scratch (random initialization).")
+
+    net_pix2pix.set_train()
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():

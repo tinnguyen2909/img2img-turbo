@@ -92,6 +92,7 @@ def parse_args_paired_training(input_args=None):
     parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"],)
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
     parser.add_argument("--set_grads_to_none", action="store_true",)
+    parser.add_argument("--continue_train", action="store_true", help="Continue training from a checkpoint")
     parser.add_argument("--path_A", type=str, required=False)
     parser.add_argument("--path_B", type=str, required=False)
 
