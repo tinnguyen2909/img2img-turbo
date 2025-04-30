@@ -95,6 +95,7 @@ def parse_args_paired_training(input_args=None):
     parser.add_argument("--continue_train", action="store_true", help="Continue training from a checkpoint")
     parser.add_argument("--path_A", type=str, required=False)
     parser.add_argument("--path_B", type=str, required=False)
+    parser.add_argument("--shuffle", action="store_true", help="Shuffle the pairs", default=False)
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -357,7 +358,7 @@ class PairedDataset(torch.utils.data.Dataset):
 
 
 class MyPairedDataset(torch.utils.data.Dataset):
-    def __init__(self, path_A, path_B, image_prep, tokenizer):
+    def __init__(self, path_A, path_B, image_prep, tokenizer, shuffle=False):
         """
         Initialize the paired dataset object for loading and transforming paired data samples
         from specified dataset folders.
@@ -400,6 +401,8 @@ class MyPairedDataset(torch.utils.data.Dataset):
             # Create pairs based on matching filenames
             for name in set(files_A_dict.keys()).intersection(files_B_dict.keys()):
                 self.pairs.append((files_A_dict[name], files_B_dict[name]))
+        if shuffle:
+            random.shuffle(self.pairs)
 
     def __len__(self):
         """
