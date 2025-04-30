@@ -92,6 +92,8 @@ def parse_args_paired_training(input_args=None):
     parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"],)
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
     parser.add_argument("--set_grads_to_none", action="store_true",)
+    parser.add_argument("--path_A", type=str, required=False)
+    parser.add_argument("--path_B", type=str, required=False)
 
     if input_args is not None:
         args = parser.parse_args(input_args)
@@ -351,6 +353,136 @@ class PairedDataset(torch.utils.data.Dataset):
             "input_ids": input_ids,
         }
 
+
+
+class MyPairedDataset(torch.utils.data.Dataset):
+    def __init__(self, path_A, path_B, image_prep, tokenizer):
+        """
+        Initialize the paired dataset object for loading and transforming paired data samples
+        from specified dataset folders.
+
+        Parameters:
+        - path_A (str): Comma-separated list of directories for domain A
+        - path_B (str): Comma-separated list of directories for domain B
+        - image_prep (str): The image preprocessing transformation to apply to each image
+        - tokenizer: The tokenizer used for tokenizing the captions (or prompts)
+        """
+        super().__init__()
+        self.paths_A = [p.strip() for p in path_A.split(',')]
+        self.paths_B = [p.strip() for p in path_B.split(',')]
+        
+        assert len(self.paths_A) == len(self.paths_B), "Number of directories in path_A must equal path_B"
+        
+        self.caption = "cartoon illustration, hd, masterpiece, 4k"
+        self.T = build_transform(image_prep)
+        self.tokenizer = tokenizer
+        self.pairs = []
+        
+        # Build pairs of images from directories
+        for dir_A, dir_B in zip(self.paths_A, self.paths_B):
+            # Get all image files in directory A and its subdirectories
+            files_A = []
+            for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.gif", "*.webp"]:
+                for root, _, _ in os.walk(dir_A):
+                    files_A.extend(glob(os.path.join(root, ext)))
+            
+            # Get all image files in directory B and its subdirectories
+            files_B = []
+            for ext in ["*.jpg", "*.jpeg", "*.png", "*.bmp", "*.gif", "*.webp"]:
+                for root, _, _ in os.walk(dir_B):
+                    files_B.extend(glob(os.path.join(root, ext)))
+            
+            # Create a mapping from filenames (without extension) to full file paths
+            files_A_dict = {os.path.splitext(os.path.basename(f))[0]: f for f in files_A}
+            files_B_dict = {os.path.splitext(os.path.basename(f))[0]: f for f in files_B}
+            
+            # Create pairs based on matching filenames
+            for name in set(files_A_dict.keys()).intersection(files_B_dict.keys()):
+                self.pairs.append((files_A_dict[name], files_B_dict[name]))
+
+    def __len__(self):
+        """
+        Returns:
+        int: The total number of pairs in the dataset.
+        """
+        return len(self.pairs)
+
+    def __getitem__(self, idx):
+        """
+        Retrieves a dataset item given its index. Each item consists of an input image, 
+        its corresponding output image, the caption, and the tokenized form of the caption.
+
+        Parameters:
+        - idx (int): The index of the item to retrieve.
+
+        Returns:
+        dict: A dictionary containing the following key-value pairs:
+            - "output_pixel_values": a tensor of the preprocessed output image with pixel values 
+            scaled to [-1, 1].
+            - "conditioning_pixel_values": a tensor of the preprocessed input image with pixel values 
+            scaled to [0, 1].
+            - "caption": the text caption.
+            - "input_ids": a tensor of the tokenized caption.
+        """
+        input_path, output_path = self.pairs[idx]
+        
+        # Load images
+        input_img = Image.open(input_path).convert('RGB')  # Domain A is always RGB
+        output_img = Image.open(output_path)  # Domain B may have transparency
+        
+        # Process domain B (output image) - handle transparency
+        if output_img.mode in ('RGBA', 'LA') or (output_img.mode == 'P' and 'transparency' in output_img.info):
+            # Create a white background
+            white_bg = Image.new('RGB', output_img.size, (255, 255, 255))
+            
+            # Convert to RGBA if it's palette mode with transparency
+            if output_img.mode == 'P':
+                output_img = output_img.convert('RGBA')
+            
+            # Extract alpha mask from domain B
+            alpha_mask = None
+            if output_img.mode == 'RGBA':
+                alpha_mask = output_img.split()[3]  # Get alpha channel
+            elif output_img.mode == 'LA':
+                alpha_mask = output_img.split()[1]  # Get alpha channel
+                
+            # Paste output_img onto white background using alpha channel as mask
+            white_bg.paste(output_img, (0, 0), output_img)
+            output_img = white_bg
+            
+            # Process domain A (input image) - use domain B's mask if available
+            if alpha_mask:
+                # Create a white background
+                white_bg_A = Image.new('RGB', input_img.size, (255, 255, 255))
+                # Paste domain A image using domain B's alpha mask
+                white_bg_A.paste(input_img, (0, 0), alpha_mask)
+                input_img = white_bg_A
+        else:
+            # If domain B has no transparency, just convert it to RGB
+            output_img = output_img.convert('RGB')
+            # No mask processing needed for domain A in this case
+        
+        # Process input image (scaled to 0,1)
+        img_t = self.T(input_img)
+        img_t = F.to_tensor(img_t)
+        
+        # Process output image (scaled to -1,1)
+        output_t = self.T(output_img)
+        output_t = F.to_tensor(output_t)
+        output_t = F.normalize(output_t, mean=[0.5], std=[0.5])
+
+        # Tokenize caption
+        input_ids = self.tokenizer(
+            self.caption, max_length=self.tokenizer.model_max_length,
+            padding="max_length", truncation=True, return_tensors="pt"
+        ).input_ids
+
+        return {
+            "output_pixel_values": output_t,
+            "conditioning_pixel_values": img_t,
+            "caption": self.caption,
+            "input_ids": input_ids,
+        }
 
 class UnpairedDataset(torch.utils.data.Dataset):
     def __init__(self, dataset_folder, split, image_prep, tokenizer):

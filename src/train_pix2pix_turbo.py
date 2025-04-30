@@ -21,7 +21,7 @@ import wandb
 from cleanfid.fid import get_folder_features, build_feature_extractor, fid_from_feats
 
 from pix2pix_turbo import Pix2Pix_Turbo
-from my_utils.training_utils import parse_args_paired_training, PairedDataset
+from my_utils.training_utils import parse_args_paired_training, PairedDataset, MyPairedDataset
 
 
 def main(args):
@@ -111,10 +111,11 @@ def main(args):
             num_training_steps=args.max_train_steps * accelerator.num_processes,
             num_cycles=args.lr_num_cycles, power=args.lr_power)
 
-    dataset_train = PairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_image_prep, split="train", tokenizer=net_pix2pix.tokenizer)
+    # dataset_train = PairedDataset(dataset_folder=args.dataset_folder, image_prep=args.train_image_prep, split="train", tokenizer=net_pix2pix.tokenizer)
+    dataset_train = MyPairedDataset(args.path_A, args.path_B, image_prep=args.train_image_prep, tokenizer=net_pix2pix.tokenizer)
     dl_train = torch.utils.data.DataLoader(dataset_train, batch_size=args.train_batch_size, shuffle=True, num_workers=args.dataloader_num_workers)
-    dataset_val = PairedDataset(dataset_folder=args.dataset_folder, image_prep=args.test_image_prep, split="test", tokenizer=net_pix2pix.tokenizer)
-    dl_val = torch.utils.data.DataLoader(dataset_val, batch_size=1, shuffle=False, num_workers=0)
+    # dataset_val = PairedDataset(dataset_folder=args.dataset_folder, image_prep=args.test_image_prep, split="test", tokenizer=net_pix2pix.tokenizer)
+    # dl_val = torch.utils.data.DataLoader(dataset_val, batch_size=1, shuffle=False, num_workers=0)
 
     # Prepare everything with our `accelerator`.
     net_pix2pix, net_disc, optimizer, optimizer_disc, dl_train, lr_scheduler, lr_scheduler_disc = accelerator.prepare(
@@ -150,7 +151,7 @@ def main(args):
             module.fused_attn = False
 
     # compute the reference stats for FID tracking
-    if accelerator.is_main_process and args.track_val_fid:
+    if False and accelerator.is_main_process and args.track_val_fid:
         feat_model = build_feature_extractor("clean", "cuda", use_dataparallel=False)
 
         def fn_transform(x):
@@ -256,7 +257,7 @@ def main(args):
                         accelerator.unwrap_model(net_pix2pix).save_model(outf)
 
                     # compute validation set FID, L2, LPIPS, CLIP-SIM
-                    if global_step % args.eval_freq == 1:
+                    if False and global_step % args.eval_freq == 1:
                         l_l2, l_lpips, l_clipsim = [], [], []
                         if args.track_val_fid:
                             os.makedirs(os.path.join(args.output_dir, "eval", f"fid_{global_step}"), exist_ok=True)
