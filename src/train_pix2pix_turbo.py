@@ -272,6 +272,22 @@ def main(args):
                     if global_step % args.checkpointing_steps == 1:
                         outf = os.path.join(args.output_dir, "checkpoints", f"model_{global_step}.pkl")
                         accelerator.unwrap_model(net_pix2pix).save_model(outf)
+                        
+                        # Keep only the 3 most recent checkpoints based on file modification time
+                        checkpoint_dir = os.path.join(args.output_dir, "checkpoints")
+                        checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith(".pkl")]
+                        
+                        # Sort by modification time (newest first)
+                        checkpoints.sort(key=lambda x: os.path.getmtime(os.path.join(checkpoint_dir, x)), reverse=True)
+                        
+                        # Delete older checkpoints beyond the last 3
+                        for checkpoint in checkpoints[3:]:
+                            checkpoint_path = os.path.join(checkpoint_dir, checkpoint)
+                            try:
+                                os.remove(checkpoint_path)
+                                print(f"Removed old checkpoint: {checkpoint}")
+                            except Exception as e:
+                                print(f"Failed to remove checkpoint {checkpoint}: {e}")
 
                     # compute validation set FID, L2, LPIPS, CLIP-SIM
                     if False and global_step % args.eval_freq == 1:

@@ -44,8 +44,8 @@ def parse_args_paired_training(input_args=None):
     parser.add_argument("--revision", type=str, default=None,)
     parser.add_argument("--variant", type=str, default=None,)
     parser.add_argument("--tokenizer_name", type=str, default=None)
-    parser.add_argument("--lora_rank_unet", default=8, type=int)
-    parser.add_argument("--lora_rank_vae", default=4, type=int)
+    parser.add_argument("--lora_rank_unet", default=64, type=int)
+    parser.add_argument("--lora_rank_vae", default=16, type=int)
 
     # training details
     parser.add_argument("--output_dir", required=True)
