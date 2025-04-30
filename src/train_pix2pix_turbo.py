@@ -57,8 +57,9 @@ def main(args):
                                     lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
         print(f"Resuming training from checkpoint: {args.pretrained_model_name_or_path}")
     else:
-        net_pix2pix = Pix2Pix_Turbo(pretrained_name=args.pretrained_model_name_or_path,
-                                    lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
+        # net_pix2pix = Pix2Pix_Turbo(pretrained_name=args.pretrained_model_name_or_path,
+        #                             lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
+        net_pix2pix = Pix2Pix_Turbo(lora_rank_unet=args.lora_rank_unet, lora_rank_vae=args.lora_rank_vae)
         if args.pretrained_model_name_or_path:
             print(f"Starting training from pretrained model: {args.pretrained_model_name_or_path}")
         else:
@@ -152,6 +153,15 @@ def main(args):
     net_disc.to(accelerator.device, dtype=weight_dtype)
     net_lpips.to(accelerator.device, dtype=weight_dtype)
     net_clip.to(accelerator.device, dtype=weight_dtype)
+
+    # Print number of trainable parameters
+    if accelerator.is_main_process:
+        generator_params = sum(p.numel() for p in net_pix2pix.parameters() if p.requires_grad)
+        discriminator_params = sum(p.numel() for p in net_disc.parameters() if p.requires_grad)
+        total_params = generator_params + discriminator_params
+        print(f"Number of trainable parameters: {total_params:,}")
+        print(f"  - Generator: {generator_params:,}")
+        print(f"  - Discriminator: {discriminator_params:,}")
 
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
