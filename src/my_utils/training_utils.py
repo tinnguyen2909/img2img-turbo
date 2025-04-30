@@ -216,6 +216,18 @@ def build_transform(image_prep):
             transforms.RandomCrop((256, 256)),
             transforms.RandomHorizontalFlip(),
         ])
+    elif image_prep == "resize_1024_randomcrop_512x512_hflip":
+        T = transforms.Compose([
+            transforms.Resize((1024, 1024), interpolation=Image.LANCZOS),
+            transforms.RandomCrop((512, 512)),
+            transforms.RandomHorizontalFlip(),
+        ])
+    elif image_prep == "resize_768_randomcrop_512x512_hflip":
+        T = transforms.Compose([
+            transforms.Resize((768, 768), interpolation=Image.LANCZOS),
+            transforms.RandomCrop((512, 512)),
+            transforms.RandomHorizontalFlip(),
+        ])
     elif image_prep == "resize_512_randomcrop_256x256_hflip":
         T = transforms.Compose([
             transforms.Resize((512, 512), interpolation=Image.LANCZOS),
@@ -466,13 +478,68 @@ class MyPairedDataset(torch.utils.data.Dataset):
             output_img = output_img.convert('RGB')
             # No mask processing needed for domain A in this case
         
-        # Process input image (scaled to 0,1)
-        img_t = self.T(input_img)
-        img_t = F.to_tensor(img_t)
+        # Check if we have a Compose transform with RandomCrop and/or RandomHorizontalFlip
+        if isinstance(self.T, transforms.Compose):
+            # Apply transforms sequentially, but handle RandomCrop and RandomHorizontalFlip specially
+            input_transformed = input_img
+            output_transformed = output_img
+            
+            should_flip = None
+            crop_params = None
+            
+            # Find RandomCrop and RandomHorizontalFlip transforms
+            random_crop_transform = None
+            for transform in self.T.transforms:
+                if isinstance(transform, transforms.RandomCrop):
+                    random_crop_transform = transform
+                    
+            # Apply each transform in sequence
+            for transform in self.T.transforms:
+                if isinstance(transform, transforms.RandomCrop):
+                    # Extract crop size from the transform
+                    crop_size = transform.size
+                    crop_height, crop_width = (crop_size, crop_size) if isinstance(crop_size, int) else crop_size
+                    
+                    # Get current image dimensions
+                    width, height = input_transformed.size
+                    
+                    # Generate random crop parameters (same for both images)
+                    if crop_params is None:
+                        # Make sure crop is valid
+                        max_i = height - crop_height
+                        max_j = width - crop_width
+                        i = random.randint(0, max(0, max_i))
+                        j = random.randint(0, max(0, max_j))
+                        crop_params = (i, j, crop_height, crop_width)
+                    
+                    # Apply same crop to both images
+                    input_transformed = F.crop(input_transformed, *crop_params)
+                    output_transformed = F.crop(output_transformed, *crop_params)
+                    
+                elif isinstance(transform, transforms.RandomHorizontalFlip):
+                    # Determine if we should flip (same for both images)
+                    if should_flip is None:
+                        should_flip = random.random() < transform.p
+                    
+                    # Apply same flip decision to both images
+                    if should_flip:
+                        input_transformed = F.hflip(input_transformed)
+                        output_transformed = F.hflip(output_transformed)
+                        
+                else:
+                    # Apply all other transforms normally
+                    input_transformed = transform(input_transformed)
+                    output_transformed = transform(output_transformed)
+            
+            # Convert to tensors
+            img_t = F.to_tensor(input_transformed)
+            output_t = F.to_tensor(output_transformed)
+        else:
+            # Use the original transform if it's not a composition
+            img_t = F.to_tensor(self.T(input_img))
+            output_t = F.to_tensor(self.T(output_img))
         
-        # Process output image (scaled to -1,1)
-        output_t = self.T(output_img)
-        output_t = F.to_tensor(output_t)
+        # Normalize output image to [-1,1]
         output_t = F.normalize(output_t, mean=[0.5], std=[0.5])
 
         # Tokenize caption
